@@ -12,6 +12,7 @@ const TOKEN = process.env.BOT_TOKEN;
 const ADMIN = process.env.ADMIN_CHAT_ID ? Number(process.env.ADMIN_CHAT_ID) : null;
 const DB_PATH = process.env.DB_PATH || './data/bot.db';
 const BASE = 'https://ph.yhb.org.il';
+const DAILY_API = `${BASE}/wp-content/plugins/db-connect/pninayomit-2025/he_py.php`;
 const DAILY_URL = `${BASE}/pninayomit/`;
 const UA = 'PenineiHalachaYomiBot/1.0';
 
@@ -42,65 +43,43 @@ async function fetchHTML(url) {
 }
 
 async function scrapeDailyHalachot() {
-    const html = await fetchHTML(DAILY_URL);
+    // The site loads content dynamically via API with a timestamp parameter
+    const html = await fetchHTML(`${DAILY_API}?date=${Date.now()}`);
     const $ = cheerio.load(html);
-
-    // Find halacha links (pattern: /XX-YY-ZZ/)
-    const pattern = /^https?:\/\/ph\.yhb\.org\.il\/(\d{2}-\d{2}-\d{2})\/?$/;
-    const urls = [];
-    $('a[href]').each((_, el) => {
-        const href = $(el).attr('href');
-        if (href && pattern.test(href) && !urls.includes(href)) urls.push(href);
-    });
-
-    // Also check script tags for dynamically injected URLs
-    if (urls.length < 2) {
-        $('script').each((_, el) => {
-            const s = $(el).html() || '';
-            const matches = s.match(/https?:\/\/ph\.yhb\.org\.il\/\d{2}-\d{2}-\d{2}\/?/g);
-            if (matches) matches.forEach(m => { if (!urls.includes(m)) urls.push(m); });
-        });
-    }
-
-    if (urls.length === 0) throw new Error('No halacha links found — site structure may have changed');
 
     const results = [];
-    for (const url of urls.slice(0, 2)) {
-        try { results.push(await scrapeHalachaPage(url)); }
-        catch { results.push({ url, title: 'הלכה', audioUrl: null }); }
-    }
-    return results;
-}
+    $('.ym-hala-1, .ym-hala-2').each((i, container) => {
+        const $c = $(container);
+        const link = $c.find('h3 a[href]').first();
+        const url = link.attr('href') || DAILY_URL;
+        const title = link.text().trim() || 'הלכה';
+        let audioUrl = $c.find('audio source').attr('src') || $c.find('audio').attr('src') || null;
 
-async function scrapeHalachaPage(url) {
-    const html = await fetchHTML(url);
-    const $ = cheerio.load(html);
-    const title = $('h1').first().text().trim() || 'הלכה';
+        // Fallback: derive audio URL from page URL (e.g. /20-26-12/ → mp3/20-26-12.mp3)
+        if (!audioUrl) {
+            const id = url.match(/(\d{2}-\d{2}-\d{2})/)?.[1];
+            if (id) audioUrl = `https://cdn1.yhb.org.il/mp3/${id}.mp3`;
+        }
 
-    let audioUrl = $('audio source').attr('src') || $('audio').attr('src') || null;
+        if (audioUrl?.startsWith('//')) audioUrl = 'https:' + audioUrl;
+        else if (audioUrl?.startsWith('/')) audioUrl = BASE + audioUrl;
 
-    if (!audioUrl) $('a[href*=".mp3"]').each((_, el) => { if (!audioUrl) audioUrl = $(el).attr('href'); });
+        results.push({ url, title, audioUrl });
+    });
 
-    if (!audioUrl) {
-        $('script').each((_, el) => {
-            if (audioUrl) return;
-            const m = ($(el).html() || '').match(/(https?:\/\/[^\s"']+\.mp3)/);
-            if (m) audioUrl = m[1];
+    // Fallback: try matching any halacha links if class-based selection found nothing
+    if (results.length === 0) {
+        $('h3 a[href*="ph.yhb.org.il"]').each((_, el) => {
+            const url = $(el).attr('href');
+            const title = $(el).text().trim() || 'הלכה';
+            const id = url.match(/(\d{2}-\d{2}-\d{2})/)?.[1];
+            const audioUrl = id ? `https://cdn1.yhb.org.il/mp3/${id}.mp3` : null;
+            results.push({ url, title, audioUrl });
         });
     }
 
-    if (!audioUrl) {
-        const id = url.match(/(\d{2}-\d{2}-\d{2})/)?.[1];
-        if (id) {
-            const guess = `https://cdn1.yhb.org.il/uploads/audio/${id}.mp3`;
-            try { if ((await fetch(guess, { method: 'HEAD', headers: { 'User-Agent': UA } })).ok) audioUrl = guess; } catch {}
-        }
-    }
-
-    if (audioUrl?.startsWith('//')) audioUrl = 'https:' + audioUrl;
-    else if (audioUrl?.startsWith('/')) audioUrl = BASE + audioUrl;
-
-    return { url, title, audioUrl };
+    if (results.length === 0) throw new Error('No halacha links found — site structure may have changed');
+    return results.slice(0, 2);
 }
 
 // --- Bot ---
