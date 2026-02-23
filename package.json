@@ -3,14 +3,24 @@
   "version": "1.0.0",
   "description": "Telegram bot: 2 daily Peninei Halacha voice recordings at 5AM Israel time",
   "main": "bot.js",
-  "scripts": { "start": "node bot.js" },
+  "scripts": {
+    "start": "node bot.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
+  },
   "license": "MIT",
   "dependencies": {
-    "grammy": "^1.21.0",
-    "node-cron": "^3.0.3",
-    "cheerio": "^1.0.0",
     "better-sqlite3": "^11.0.0",
-    "dotenv": "^16.4.0"
+    "cheerio": "^1.0.0",
+    "dotenv": "^16.4.0",
+    "grammy": "^1.21.0",
+    "node-cron": "^3.0.3"
   },
-  "engines": { "node": ">=18" }
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "vitest": "^4.0.18"
+  }
 }
