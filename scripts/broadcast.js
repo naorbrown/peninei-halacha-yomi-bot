@@ -12,7 +12,7 @@
 
 import TelegramBot from 'node-telegram-bot-api';
 import { scrapeDailyHalachot, dailyApiUrls, clearCache } from '../src/scraper.js';
-import { buildCaption } from '../src/messageBuilder.js';
+import { sendDailyContent } from '../src/sender.js';
 import { loadSubscribers, removeSubscriber } from '../src/utils/subscribers.js';
 import { wasBroadcastSentToday, markBroadcastSent } from '../src/utils/broadcastState.js';
 import { isIsraelBroadcastWindow } from '../src/utils/israelTime.js';
@@ -43,42 +43,6 @@ function sleep(ms) {
 }
 
 /**
- * Send a single halacha to a chat
- */
-async function sendHalacha(chatId, halacha, index) {
-  const caption = buildCaption(halacha, index);
-
-  if (halacha.audioUrl) {
-    try {
-      await bot.sendAudio(chatId, halacha.audioUrl, {
-        caption,
-        parse_mode: 'Markdown',
-        title: halacha.title,
-        performer: 'פניני הלכה',
-      });
-      return true;
-    } catch (e) {
-      console.warn(`[audio-fallback] chat=${chatId}: ${e.message}`);
-    }
-  }
-
-  await bot.sendMessage(chatId, caption + '\n\n_⚠️ הקלטה לא זמינה_', {
-    parse_mode: 'Markdown',
-    disable_web_page_preview: true,
-  });
-  return true;
-}
-
-/**
- * Send today's halachot to a single chat
- */
-async function sendDailyContent(chatId, halachot) {
-  for (let i = 0; i < halachot.length; i++) {
-    await sendHalacha(chatId, halachot[i], i);
-  }
-}
-
-/**
  * Main broadcast function
  */
 async function runBroadcast() {
@@ -104,15 +68,21 @@ async function runBroadcast() {
     : dailyApiUrls();
   const halachot = await scrapeDailyHalachot(fetch, apiUrls);
   console.log(`Found ${halachot.length} halachot: ${halachot.map(h => h.title).join(', ')}`);
+  console.log(`Audio URLs: ${halachot.map(h => h.audioUrl || '(none)').join(', ')}`);
 
-  const stats = { channel: false, subscribers: { sent: 0, failed: 0, removed: 0 } };
+  const stats = {
+    channel: false,
+    channelAudio: 0,
+    subscribers: { sent: 0, failed: 0, removed: 0, audioDelivered: 0, textOnly: 0 },
+  };
 
   // --- Channel broadcast ---
   if (CHANNEL_ID) {
     try {
-      await sendDailyContent(CHANNEL_ID, halachot);
+      const result = await sendDailyContent(bot, CHANNEL_ID, halachot, fetch);
       stats.channel = true;
-      console.log(`Channel ${CHANNEL_ID}: sent`);
+      stats.channelAudio = result.audioCount;
+      console.log(`Channel ${CHANNEL_ID}: sent (audio: ${result.audioCount}/${halachot.length})`);
     } catch (e) {
       console.error(`Channel ${CHANNEL_ID} failed: ${e.message}`);
     }
@@ -124,8 +94,10 @@ async function runBroadcast() {
 
   for (const chatId of subscribers) {
     try {
-      await sendDailyContent(chatId, halachot);
+      const result = await sendDailyContent(bot, chatId, halachot, fetch);
       stats.subscribers.sent++;
+      stats.subscribers.audioDelivered += result.audioCount;
+      stats.subscribers.textOnly += result.textCount;
     } catch (e) {
       const errCode = e?.response?.body?.error_code;
       if (errCode === 403) {
@@ -152,13 +124,19 @@ async function runBroadcast() {
   }
 
   // --- Summary ---
+  const totalMessages = subscribers.length * halachot.length;
+  const audioRate = totalMessages > 0
+    ? Math.round((stats.subscribers.audioDelivered / totalMessages) * 100)
+    : 0;
+
   const summary =
     `✅ Broadcast complete\n` +
     `📖 ${halachot.map(h => h.title).join('\n📖 ')}\n` +
-    `📢 Channel: ${stats.channel ? 'sent' : 'skipped'}\n` +
+    `📢 Channel: ${stats.channel ? `sent (🔊 ${stats.channelAudio}/${halachot.length} audio)` : 'skipped'}\n` +
     `👥 Subscribers: ${stats.subscribers.sent}/${subscribers.length} sent` +
     (stats.subscribers.failed ? `, ${stats.subscribers.failed} failed` : '') +
-    (stats.subscribers.removed ? `, ${stats.subscribers.removed} removed` : '');
+    (stats.subscribers.removed ? `, ${stats.subscribers.removed} removed` : '') +
+    `\n🔊 Audio: ${stats.subscribers.audioDelivered} delivered, ${stats.subscribers.textOnly} text-only (${audioRate}% audio rate)`;
 
   console.log(summary);
 

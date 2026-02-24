@@ -15,7 +15,8 @@
 import 'dotenv/config';
 import TelegramBot from 'node-telegram-bot-api';
 import { scrapeDailyHalachot, dailyApiUrls, clearCache, DAILY_URL } from './scraper.js';
-import { buildCaption, buildWelcomeMessage } from './messageBuilder.js';
+import { buildWelcomeMessage } from './messageBuilder.js';
+import { sendDailyContent } from './sender.js';
 import { addSubscriber, removeSubscriber } from './utils/subscribers.js';
 import { createRateLimiter } from './utils/rateLimiter.js';
 
@@ -38,41 +39,6 @@ const limiter = createRateLimiter();
 function getApiUrls() {
   if (process.env.DAILY_API_URL) return [process.env.DAILY_API_URL];
   return dailyApiUrls();
-}
-
-/**
- * Send a single halacha (audio + caption, or text fallback) to a chat
- */
-async function sendHalacha(chatId, halacha, index) {
-  const caption = buildCaption(halacha, index);
-
-  if (halacha.audioUrl) {
-    try {
-      await bot.sendAudio(chatId, halacha.audioUrl, {
-        caption,
-        parse_mode: 'Markdown',
-        title: halacha.title,
-        performer: 'פניני הלכה',
-      });
-      return;
-    } catch (e) {
-      console.warn(`[audio-fallback] chat=${chatId} url=${halacha.audioUrl}: ${e.message}`);
-    }
-  }
-
-  await bot.sendMessage(chatId, caption + '\n\n_⚠️ הקלטה לא זמינה_', {
-    parse_mode: 'Markdown',
-    disable_web_page_preview: true,
-  });
-}
-
-/**
- * Send today's halachot to a single chat
- */
-async function sendDailyContent(chatId, halachot) {
-  for (let i = 0; i < halachot.length; i++) {
-    await sendHalacha(chatId, halachot[i], i);
-  }
 }
 
 // Initialize bot commands
@@ -104,7 +70,8 @@ bot.on('message', async msg => {
       await bot.sendMessage(chatId, buildWelcomeMessage(), { parse_mode: 'Markdown' });
 
       const halachot = await scrapeDailyHalachot(fetch, getApiUrls());
-      await sendDailyContent(chatId, halachot);
+      const result = await sendDailyContent(bot, chatId, halachot, fetch);
+      console.log(`[/start] chat=${chatId} audio=${result.audioCount} text=${result.textCount}`);
     } catch (err) {
       console.error('Command /start failed:', err.message);
       await bot.sendMessage(chatId, '⚠️ לא הצלחתי. נסו שוב מאוחר יותר:\n' + DAILY_URL).catch(() => {});
@@ -120,7 +87,8 @@ bot.on('message', async msg => {
     await bot.sendMessage(chatId, '🔄 מחפש...');
     try {
       const halachot = await scrapeDailyHalachot(fetch, getApiUrls());
-      await sendDailyContent(chatId, halachot);
+      const result = await sendDailyContent(bot, chatId, halachot, fetch);
+      console.log(`[/today] chat=${chatId} audio=${result.audioCount} text=${result.textCount}`);
     } catch (e) {
       console.error(`[/today] chat=${chatId} failed:`, e);
       await bot.sendMessage(chatId, '⚠️ לא הצלחתי. נסו שוב מאוחר יותר:\n' + DAILY_URL).catch(() => {});
@@ -135,8 +103,8 @@ bot.on('message', async msg => {
     try {
       clearCache();
       const halachot = await scrapeDailyHalachot(fetch, getApiUrls());
-      await sendDailyContent(chatId, halachot);
-      await bot.sendMessage(chatId, '✅ נשלח');
+      const result = await sendDailyContent(bot, chatId, halachot, fetch);
+      await bot.sendMessage(chatId, `✅ נשלח (🔊 ${result.audioCount}/${halachot.length} audio)`);
     } catch (e) {
       await bot.sendMessage(chatId, `🚨 Failed: ${e.message}`).catch(() => {});
     }
