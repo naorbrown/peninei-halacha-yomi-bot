@@ -78,7 +78,7 @@ export function parseHalachot(html) {
 
     // Fallback: derive audio URL from page URL pattern (e.g. /20-26-12/ -> mp3/20-26-12.mp3)
     if (!audioUrl) {
-      const id = url.match(/(\d{2}-\d{2}-\d{2})/)?.[1];
+      const id = url.match(/(\d+-\d+-\d+)/)?.[1];
       if (id) audioUrl = `https://cdn1.yhb.org.il/mp3/${id}.mp3`;
     }
 
@@ -102,7 +102,7 @@ export function parseHalachot(html) {
     $('h3 a[href*="ph.yhb.org.il"]').each((_el, el) => {
       const url = $(el).attr('href');
       const title = $(el).text().trim() || 'הלכה';
-      const id = url.match(/(\d{2}-\d{2}-\d{2})/)?.[1];
+      const id = url.match(/(\d+-\d+-\d+)/)?.[1];
       const audioUrl = id ? `https://cdn1.yhb.org.il/mp3/${id}.mp3` : null;
       results.push({ url, title, audioUrl });
     });

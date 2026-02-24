@@ -107,6 +107,28 @@ describe('Scraper — parseHalachot()', () => {
       expect(results[0].audioUrl).toBe('https://cdn1.yhb.org.il/mp3/20-26-12.mp3');
       expect(results[1].audioUrl).toBe('https://cdn1.yhb.org.il/mp3/20-26-13.mp3');
     });
+
+    it('derives audio URLs from variable-length URL patterns', () => {
+      const html = `
+        <div class="ym-hala-1">
+          <h3><a href="https://ph.yhb.org.il/4-9-2/">ב - משמעות החלום</a></h3>
+        </div>
+        <div class="ym-hala-2">
+          <h3><a href="https://ph.yhb.org.il/4-9-3/">ג - פתרון החלום</a></h3>
+        </div>`;
+      const results = parseHalachot(html);
+      expect(results[0].audioUrl).toBe('https://cdn1.yhb.org.il/mp3/4-9-2.mp3');
+      expect(results[1].audioUrl).toBe('https://cdn1.yhb.org.il/mp3/4-9-3.mp3');
+    });
+
+    it('derives audio URLs from mixed-length URL patterns', () => {
+      const html = `
+        <div class="ym-hala-1">
+          <h3><a href="https://ph.yhb.org.il/29-9-12/">הלכה א</a></h3>
+        </div>`;
+      const results = parseHalachot(html);
+      expect(results[0].audioUrl).toBe('https://cdn1.yhb.org.il/mp3/29-9-12.mp3');
+    });
   });
 
   describe('protocol-relative and root-relative audio URLs', () => {
