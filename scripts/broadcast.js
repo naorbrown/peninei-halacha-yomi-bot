@@ -86,15 +86,6 @@ async function runBroadcast() {
   }
 
   console.log(summary);
-
-  // --- Notify admin (text summary, separate from content delivery) ---
-  if (ADMIN_CHAT_ID) {
-    try {
-      await bot.sendMessage(ADMIN_CHAT_ID, summary);
-    } catch (e) {
-      console.error(`Failed to notify admin: ${e.message}`);
-    }
-  }
 }
 
 // --- Run ---
