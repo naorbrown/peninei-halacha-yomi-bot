@@ -2,27 +2,14 @@
 require('dotenv').config();
 const { Bot } = require('grammy');
 const cron = require('node-cron');
-const cheerio = require('cheerio');
 const Database = require('better-sqlite3');
 const { mkdirSync, existsSync } = require('fs');
 const { dirname } = require('path');
+const lib = require('./lib');
 
 // --- Config ---
 const TOKEN = process.env.BOT_TOKEN;
 const DB_PATH = process.env.DB_PATH || './data/bot.db';
-const BASE = 'https://ph.yhb.org.il';
-const DAILY_URL = `${BASE}/pninayomit/`;
-const ALLOWED_HOSTS = ['ph.yhb.org.il', 'yhb.org.il', 'cdn1.yhb.org.il'];
-
-// Browser-like headers to avoid bot-detection blocking (e.g. Cloudflare)
-const FETCH_HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-    'Accept-Language': 'he-IL,he;q=0.9,en-US;q=0.8,en;q=0.7',
-    'Accept-Encoding': 'gzip, deflate, br',
-    'Connection': 'keep-alive',
-    'Referer': `${BASE}/`,
-};
 
 if (!TOKEN || TOKEN === 'your_bot_token_here') {
     console.error('Set BOT_TOKEN in .env'); process.exit(1);
@@ -52,114 +39,14 @@ const addSub    = db.prepare('INSERT OR REPLACE INTO subscribers (chat_id, activ
 const removeSub = db.prepare('UPDATE subscribers SET active = 0 WHERE chat_id = ?');
 const getSubs   = db.prepare('SELECT chat_id FROM subscribers WHERE active = 1');
 
-// --- URL validation ---
-function isAllowedUrl(url) {
-    try {
-        return ALLOWED_HOSTS.includes(new URL(url).hostname);
-    } catch { return false; }
-}
-
-// --- Scraper ---
-function dailyApiUrls() {
-    // Returns an ordered list of API URL candidates to try.
-    // The site uses year-based directories (pninayomit-YYYY); if the current
-    // year's directory doesn't exist yet, we fall back to the previous year
-    // and a yearless path. The env override takes top priority.
+// --- Scraper (uses lib.js with global fetch) ---
+function getApiUrls() {
     if (process.env.DAILY_API_URL) return [process.env.DAILY_API_URL];
-    const year = new Date().getFullYear();
-    return [
-        `${BASE}/wp-content/plugins/db-connect/pninayomit-${year}/he_py.php`,
-        `${BASE}/wp-content/plugins/db-connect/pninayomit-${year - 1}/he_py.php`,
-        `${BASE}/wp-content/plugins/db-connect/pninayomit/he_py.php`,
-    ];
-}
-
-async function fetchHTML(url) {
-    const r = await fetch(url, {
-        headers: FETCH_HEADERS,
-        signal: AbortSignal.timeout(15000),
-        redirect: 'follow',
-    });
-    if (!r.ok) throw new Error(`HTTP ${r.status} for ${url}`);
-    return r.text();
-}
-
-function parseHalachot(html) {
-    const $ = cheerio.load(html);
-
-    const results = [];
-    $('.ym-hala-1, .ym-hala-2').each((i, container) => {
-        const $c = $(container);
-        const link = $c.find('h3 a[href]').first();
-        let url = link.attr('href') || DAILY_URL;
-        const title = link.text().trim() || 'הלכה';
-        let audioUrl = $c.find('audio source').attr('src') || $c.find('audio').attr('src') || null;
-
-        // Fallback: derive audio URL from page URL (e.g. /20-26-12/ → mp3/20-26-12.mp3)
-        if (!audioUrl) {
-            const id = url.match(/(\d{2}-\d{2}-\d{2})/)?.[1];
-            if (id) audioUrl = `https://cdn1.yhb.org.il/mp3/${id}.mp3`;
-        }
-
-        if (audioUrl?.startsWith('//')) audioUrl = 'https:' + audioUrl;
-        else if (audioUrl?.startsWith('/')) audioUrl = BASE + audioUrl;
-
-        // Validate scraped URLs against allowed domains
-        if (!isAllowedUrl(url)) { console.warn(`[scraper] Unexpected URL domain: ${url}`); url = DAILY_URL; }
-        if (audioUrl && !isAllowedUrl(audioUrl)) { console.warn(`[scraper] Unexpected audio domain: ${audioUrl}`); audioUrl = null; }
-
-        results.push({ url, title, audioUrl });
-    });
-
-    // Fallback: try matching any halacha links if class-based selection found nothing
-    if (results.length === 0) {
-        $('h3 a[href*="ph.yhb.org.il"]').each((_, el) => {
-            const url = $(el).attr('href');
-            const title = $(el).text().trim() || 'הלכה';
-            const id = url.match(/(\d{2}-\d{2}-\d{2})/)?.[1];
-            const audioUrl = id ? `https://cdn1.yhb.org.il/mp3/${id}.mp3` : null;
-            results.push({ url, title, audioUrl });
-        });
-    }
-
-    return results.slice(0, 2);
+    return lib.dailyApiUrls();
 }
 
 async function scrapeDailyHalachot() {
-    const urls = dailyApiUrls();
-    const errors = [];
-
-    for (const apiUrl of urls) {
-        const fullUrl = `${apiUrl}?date=${Date.now()}`;
-        try {
-            const html = await fetchHTML(fullUrl);
-            const results = parseHalachot(html);
-            if (results.length > 0) {
-                console.log(`[scraper] Success from ${apiUrl}`);
-                return results;
-            }
-            errors.push(`${apiUrl}: returned HTML but no halachot found`);
-        } catch (e) {
-            errors.push(`${apiUrl}: ${e.message}`);
-        }
-    }
-
-    // Last resort: try scraping the main pninayomit page directly
-    try {
-        const html = await fetchHTML(DAILY_URL);
-        const results = parseHalachot(html);
-        if (results.length > 0) {
-            console.log(`[scraper] Success from main page fallback (${DAILY_URL})`);
-            return results;
-        }
-    } catch (e) {
-        errors.push(`${DAILY_URL}: ${e.message}`);
-    }
-
-    throw new Error(
-        `No halacha links found after trying ${errors.length} sources — site structure may have changed.\n` +
-        errors.map(e => `  • ${e}`).join('\n')
-    );
+    return lib.scrapeDailyHalachot(fetch, getApiUrls());
 }
 
 // --- Bot ---
@@ -187,7 +74,7 @@ bot.command('today', async (ctx) => {
         await sendHalachot(ctx.chat.id, halachot);
     } catch (e) {
         console.error(`[/today] chat=${ctx.chat.id} failed:`, e);
-        await ctx.reply('⚠️ לא הצלחתי. נסו שוב מאוחר יותר:\n' + DAILY_URL);
+        await ctx.reply('⚠️ לא הצלחתי. נסו שוב מאוחר יותר:\n' + lib.DAILY_URL);
     }
 });
 
@@ -211,8 +98,7 @@ bot.catch((err) => {
 async function sendHalachot(chatId, halachot) {
     for (let i = 0; i < halachot.length; i++) {
         const h = halachot[i];
-        const safeUrl = h.url.replace(/\)/g, '%29');
-        const caption = `📖 *הלכה ${i === 0 ? 'א' : 'ב'}:* ${escMd(h.title)}\n🔗 [לקריאה באתר](${safeUrl})`;
+        const caption = lib.buildCaption(h, i);
         if (h.audioUrl) {
             try {
                 // Pass URL string directly so Telegram downloads the file itself.
@@ -233,8 +119,6 @@ async function sendHalachot(chatId, halachot) {
     }
 }
 
-// Legacy Markdown only needs these 4 characters escaped (not MarkdownV2 set)
-function escMd(s) { return (s || '').replace(/([_*`\[])/g, '\\$1'); }
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 // --- Daily job ---
@@ -243,6 +127,8 @@ let dailyJobRunning = false;
 async function dailyJob() {
     if (dailyJobRunning) { console.warn('[daily-job] Already running, skipping'); return; }
     dailyJobRunning = true;
+    // Clear cache at start of daily job so we always get fresh content
+    lib.clearCache();
     console.log(`[${new Date().toISOString()}] Daily job started`);
     try {
         const halachot = await scrapeDailyHalachot();
