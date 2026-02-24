@@ -1,0 +1,88 @@
+name: Daily Broadcast
+
+on:
+  schedule:
+    # Run at both possible 5am Israel times to handle DST transitions:
+    # Winter (UTC+2): 5am Israel = 3am UTC
+    # Summer (UTC+3): 5am Israel = 2am UTC
+    # The script checks Israel time + "already sent today" to prevent duplicates.
+    - cron: '0 2 * * *'
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Force broadcast (bypass time and duplicate checks)'
+        required: false
+        default: 'true'
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: daily-broadcast
+  cancel-in-progress: false
+
+jobs:
+  broadcast:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Fast duplicate guard via Actions cache sentinel
+      - name: Get today's date (Israel timezone)
+        id: today
+        run: echo "date=$(TZ=Asia/Jerusalem date +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Check broadcast sentinel cache
+        id: sentinel
+        uses: actions/cache@v4
+        with:
+          path: .broadcast-sentinel
+          key: broadcast-sent-today-${{ steps.today.outputs.date }}
+
+      - name: Check if already broadcast today via sentinel
+        id: guard
+        run: |
+          if [ -f .broadcast-sentinel ] && grep -q "${{ steps.today.outputs.date }}" .broadcast-sentinel 2>/dev/null; then
+            echo "already_sent=true" >> "$GITHUB_OUTPUT"
+            echo "Broadcast sentinel found for today (${{ steps.today.outputs.date }}), skipping."
+          else
+            echo "already_sent=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Setup Node.js
+        if: steps.guard.outputs.already_sent != 'true' || github.event.inputs.force == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        if: steps.guard.outputs.already_sent != 'true' || github.event.inputs.force == 'true'
+        run: npm ci
+
+      - name: Run broadcast
+        if: steps.guard.outputs.already_sent != 'true' || github.event.inputs.force == 'true'
+        run: node scripts/broadcast.js
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
+          ADMIN_CHAT_ID: ${{ secrets.ADMIN_CHAT_ID }}
+          FORCE_BROADCAST: ${{ github.event.inputs.force || 'false' }}
+
+      - name: Write broadcast sentinel
+        if: steps.guard.outputs.already_sent != 'true' || github.event.inputs.force == 'true'
+        run: echo "${{ steps.today.outputs.date }}" > .broadcast-sentinel
+
+      - name: Commit broadcast state
+        if: steps.guard.outputs.already_sent != 'true' || github.event.inputs.force == 'true'
+        run: |
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+          git pull --rebase origin main || true
+          git add .github/state/
+          git diff --staged --quiet || git commit -m "chore: update broadcast state [skip ci]"
+          git push || (git pull --rebase origin main && git push)
