@@ -51,12 +51,18 @@ function isAllowedUrl(url) {
 }
 
 // --- Scraper ---
-function dailyApiUrl() {
-    // Derive the API path dynamically so it doesn't break on year rollover.
-    // Falls back to env override if the site changes its URL scheme.
-    if (process.env.DAILY_API_URL) return process.env.DAILY_API_URL;
+function dailyApiUrls() {
+    // Returns an ordered list of API URL candidates to try.
+    // The site uses year-based directories (pninayomit-YYYY); if the current
+    // year's directory doesn't exist yet, we fall back to the previous year
+    // and a yearless path. The env override takes top priority.
+    if (process.env.DAILY_API_URL) return [process.env.DAILY_API_URL];
     const year = new Date().getFullYear();
-    return `${BASE}/wp-content/plugins/db-connect/pninayomit-${year}/he_py.php`;
+    return [
+        `${BASE}/wp-content/plugins/db-connect/pninayomit-${year}/he_py.php`,
+        `${BASE}/wp-content/plugins/db-connect/pninayomit-${year - 1}/he_py.php`,
+        `${BASE}/wp-content/plugins/db-connect/pninayomit/he_py.php`,
+    ];
 }
 
 async function fetchHTML(url) {
@@ -65,9 +71,7 @@ async function fetchHTML(url) {
     return r.text();
 }
 
-async function scrapeDailyHalachot() {
-    // The site loads content dynamically via API with a timestamp parameter
-    const html = await fetchHTML(`${dailyApiUrl()}?date=${Date.now()}`);
+function parseHalachot(html) {
     const $ = cheerio.load(html);
 
     const results = [];
@@ -105,8 +109,44 @@ async function scrapeDailyHalachot() {
         });
     }
 
-    if (results.length === 0) throw new Error('No halacha links found — site structure may have changed');
     return results.slice(0, 2);
+}
+
+async function scrapeDailyHalachot() {
+    const urls = dailyApiUrls();
+    const errors = [];
+
+    for (const apiUrl of urls) {
+        const fullUrl = `${apiUrl}?date=${Date.now()}`;
+        try {
+            const html = await fetchHTML(fullUrl);
+            const results = parseHalachot(html);
+            if (results.length > 0) {
+                console.log(`[scraper] Success from ${apiUrl}`);
+                return results;
+            }
+            errors.push(`${apiUrl}: returned HTML but no halachot found`);
+        } catch (e) {
+            errors.push(`${apiUrl}: ${e.message}`);
+        }
+    }
+
+    // Last resort: try scraping the main pninayomit page directly
+    try {
+        const html = await fetchHTML(DAILY_URL);
+        const results = parseHalachot(html);
+        if (results.length > 0) {
+            console.log(`[scraper] Success from main page fallback (${DAILY_URL})`);
+            return results;
+        }
+    } catch (e) {
+        errors.push(`${DAILY_URL}: ${e.message}`);
+    }
+
+    throw new Error(
+        `No halacha links found after trying ${errors.length} sources — site structure may have changed.\n` +
+        errors.map(e => `  • ${e}`).join('\n')
+    );
 }
 
 // --- Bot ---
