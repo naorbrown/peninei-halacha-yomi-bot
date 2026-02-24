@@ -37,6 +37,7 @@ const FIXTURES = {
 
 const BASE = 'https://ph.yhb.org.il';
 const DAILY_URL = `${BASE}/pninayomit/`;
+const UA = 'PenineiHalachaYomiBot/1.0';
 const ALLOWED_HOSTS = ['ph.yhb.org.il', 'yhb.org.il', 'cdn1.yhb.org.il'];
 
 // ---------------------------------------------------------------------------
@@ -55,7 +56,18 @@ function escMd(s) {
   return (s || '').replace(/([_*`\[])/g, '\\$1');
 }
 
-function scrapeDailyHalachot(html) {
+/** Mirrors dailyApiUrls() from bot.js */
+function dailyApiUrls(yearOverride) {
+  const year = yearOverride || new Date().getFullYear();
+  return [
+    `${BASE}/wp-content/plugins/db-connect/pninayomit-${year}/he_py.php`,
+    `${BASE}/wp-content/plugins/db-connect/pninayomit-${year - 1}/he_py.php`,
+    `${BASE}/wp-content/plugins/db-connect/pninayomit/he_py.php`,
+  ];
+}
+
+/** Mirrors parseHalachot() from bot.js — pure HTML parsing, no network */
+function parseHalachot(html) {
   const $ = cheerio.load(html);
   const results = [];
 
@@ -95,9 +107,46 @@ function scrapeDailyHalachot(html) {
     });
   }
 
-  if (results.length === 0)
-    throw new Error('No halacha links found — site structure may have changed');
   return results.slice(0, 2);
+}
+
+/**
+ * Mirrors scrapeDailyHalachot() from bot.js — the full scrape-with-fallback
+ * flow, using the provided fetchFn instead of global fetch.
+ */
+async function scrapeDailyHalachot(fetchFn, apiUrls) {
+  const urls = apiUrls || dailyApiUrls();
+  const errors = [];
+
+  for (const apiUrl of urls) {
+    const fullUrl = `${apiUrl}?date=${Date.now()}`;
+    try {
+      const r = await fetchFn(fullUrl);
+      if (!r.ok) throw new Error(`HTTP ${r.status} for ${fullUrl}`);
+      const html = await r.text();
+      const results = parseHalachot(html);
+      if (results.length > 0) return results;
+      errors.push(`${apiUrl}: returned HTML but no halachot found`);
+    } catch (e) {
+      errors.push(`${apiUrl}: ${e.message}`);
+    }
+  }
+
+  // Last resort: try scraping the main page directly
+  try {
+    const r = await fetchFn(DAILY_URL);
+    if (!r.ok) throw new Error(`HTTP ${r.status} for ${DAILY_URL}`);
+    const html = await r.text();
+    const results = parseHalachot(html);
+    if (results.length > 0) return results;
+  } catch (e) {
+    errors.push(`${DAILY_URL}: ${e.message}`);
+  }
+
+  throw new Error(
+    `No halacha links found after trying ${errors.length} sources — site structure may have changed.\n` +
+    errors.map(e => `  • ${e}`).join('\n')
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -158,30 +207,30 @@ describe('Markdown escaping — escMd()', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 3. SCRAPER — HTML PARSING
+// 3. SCRAPER — HTML PARSING (parseHalachot)
 // ---------------------------------------------------------------------------
 
-describe('Scraper — scrapeDailyHalachot()', () => {
+describe('Scraper — parseHalachot()', () => {
   describe('standard page with audio', () => {
     it('extracts exactly two halachot', () => {
-      const results = scrapeDailyHalachot(FIXTURES.standard);
+      const results = parseHalachot(FIXTURES.standard);
       expect(results).toHaveLength(2);
     });
 
     it('parses titles correctly', () => {
-      const results = scrapeDailyHalachot(FIXTURES.standard);
+      const results = parseHalachot(FIXTURES.standard);
       expect(results[0].title).toBe('פרק כו – הלכות שבת – סעיף יב');
       expect(results[1].title).toBe('פרק כו – הלכות שבת – סעיף יג');
     });
 
     it('extracts page URLs', () => {
-      const results = scrapeDailyHalachot(FIXTURES.standard);
+      const results = parseHalachot(FIXTURES.standard);
       expect(results[0].url).toBe('https://ph.yhb.org.il/20-26-12/');
       expect(results[1].url).toBe('https://ph.yhb.org.il/20-26-13/');
     });
 
     it('extracts audio URLs from <source> elements', () => {
-      const results = scrapeDailyHalachot(FIXTURES.standard);
+      const results = parseHalachot(FIXTURES.standard);
       expect(results[0].audioUrl).toBe(
         'https://cdn1.yhb.org.il/mp3/20-26-12.mp3',
       );
@@ -193,7 +242,7 @@ describe('Scraper — scrapeDailyHalachot()', () => {
 
   describe('page without audio elements', () => {
     it('derives audio URLs from page URL pattern (XX-XX-XX)', () => {
-      const results = scrapeDailyHalachot(FIXTURES.noAudio);
+      const results = parseHalachot(FIXTURES.noAudio);
       expect(results[0].audioUrl).toBe(
         'https://cdn1.yhb.org.il/mp3/20-26-12.mp3',
       );
@@ -205,14 +254,14 @@ describe('Scraper — scrapeDailyHalachot()', () => {
 
   describe('protocol-relative and root-relative audio URLs', () => {
     it('normalizes //domain URLs to https:', () => {
-      const results = scrapeDailyHalachot(FIXTURES.protocolRelative);
+      const results = parseHalachot(FIXTURES.protocolRelative);
       expect(results[0].audioUrl).toBe(
         'https://cdn1.yhb.org.il/mp3/20-26-12.mp3',
       );
     });
 
     it('normalizes /path URLs to BASE + path', () => {
-      const results = scrapeDailyHalachot(FIXTURES.protocolRelative);
+      const results = parseHalachot(FIXTURES.protocolRelative);
       expect(results[1].audioUrl).toBe(
         'https://ph.yhb.org.il/mp3/20-26-13.mp3',
       );
@@ -221,17 +270,16 @@ describe('Scraper — scrapeDailyHalachot()', () => {
 
   describe('fallback link parsing', () => {
     it('falls back to h3 a[href] links when no .ym-hala containers exist', () => {
-      const results = scrapeDailyHalachot(FIXTURES.fallbackLinks);
+      const results = parseHalachot(FIXTURES.fallbackLinks);
       expect(results).toHaveLength(2);
       expect(results[0].url).toBe('https://ph.yhb.org.il/20-26-12/');
     });
   });
 
   describe('empty page', () => {
-    it('throws a descriptive error when no halachot are found', () => {
-      expect(() => scrapeDailyHalachot(FIXTURES.empty)).toThrow(
-        'No halacha links found',
-      );
+    it('returns empty array when no halachot are found', () => {
+      const results = parseHalachot(FIXTURES.empty);
+      expect(results).toHaveLength(0);
     });
   });
 
@@ -241,7 +289,7 @@ describe('Scraper — scrapeDailyHalachot()', () => {
         <div class="ym-hala-1">
           <h3><a href="https://evil.com/phishing">Halacha</a></h3>
         </div>`;
-      const results = scrapeDailyHalachot(html);
+      const results = parseHalachot(html);
       expect(results[0].url).toBe(DAILY_URL);
     });
 
@@ -251,7 +299,7 @@ describe('Scraper — scrapeDailyHalachot()', () => {
           <h3><a href="https://ph.yhb.org.il/20-26-12/">Halacha</a></h3>
           <audio><source src="https://evil.com/malware.mp3"></audio>
         </div>`;
-      const results = scrapeDailyHalachot(html);
+      const results = parseHalachot(html);
       // Audio from evil.com is rejected; fallback derives from URL pattern
       expect(
         results[0].audioUrl === null ||
@@ -273,9 +321,208 @@ describe('Scraper — scrapeDailyHalachot()', () => {
         <div class="ym-hala-1">
           <h3><a href="https://ph.yhb.org.il/20-26-12/">C</a></h3>
         </div>`;
-      const results = scrapeDailyHalachot(html);
+      const results = parseHalachot(html);
       expect(results.length).toBeLessThanOrEqual(2);
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 3b. SCRAPER — URL FALLBACK CHAIN (scrapeDailyHalachot)
+// ---------------------------------------------------------------------------
+
+describe('Scraper — URL fallback chain', () => {
+  function mockFetchOk(html) {
+    return async () => ({ ok: true, text: async () => html });
+  }
+
+  function mockFetchFail(status) {
+    return async (url) => ({ ok: false, status, text: async () => '' });
+  }
+
+  function mockFetchError(msg) {
+    return async () => { throw new Error(msg); };
+  }
+
+  it('succeeds on the first URL when it returns valid content', async () => {
+    const fetchFn = mockFetchOk(FIXTURES.standard);
+    const results = await scrapeDailyHalachot(fetchFn, [
+      'https://ph.yhb.org.il/api/2026',
+      'https://ph.yhb.org.il/api/2025',
+    ]);
+    expect(results).toHaveLength(2);
+    expect(results[0].title).toBe('פרק כו – הלכות שבת – סעיף יב');
+  });
+
+  it('falls back to second URL when first returns HTTP error', async () => {
+    let callCount = 0;
+    const fetchFn = async (url) => {
+      callCount++;
+      if (callCount === 1) return { ok: false, status: 404, text: async () => '' };
+      return { ok: true, text: async () => FIXTURES.standard };
+    };
+    const results = await scrapeDailyHalachot(fetchFn, [
+      'https://ph.yhb.org.il/api/2026',
+      'https://ph.yhb.org.il/api/2025',
+    ]);
+    expect(results).toHaveLength(2);
+    expect(callCount).toBe(2);
+  });
+
+  it('falls back to second URL when first throws a network error', async () => {
+    let callCount = 0;
+    const fetchFn = async (url) => {
+      callCount++;
+      if (callCount === 1) throw new Error('fetch failed');
+      return { ok: true, text: async () => FIXTURES.standard };
+    };
+    const results = await scrapeDailyHalachot(fetchFn, [
+      'https://ph.yhb.org.il/api/2026',
+      'https://ph.yhb.org.il/api/2025',
+    ]);
+    expect(results).toHaveLength(2);
+    expect(callCount).toBe(2);
+  });
+
+  it('falls back to third URL when first two fail', async () => {
+    let callCount = 0;
+    const fetchFn = async (url) => {
+      callCount++;
+      if (callCount <= 2) return { ok: false, status: 404, text: async () => '' };
+      return { ok: true, text: async () => FIXTURES.standard };
+    };
+    const results = await scrapeDailyHalachot(fetchFn, [
+      'https://ph.yhb.org.il/api/2026',
+      'https://ph.yhb.org.il/api/2025',
+      'https://ph.yhb.org.il/api/yearless',
+    ]);
+    expect(results).toHaveLength(2);
+    expect(callCount).toBe(3);
+  });
+
+  it('falls back when URL returns HTML but no halachot', async () => {
+    let callCount = 0;
+    const fetchFn = async (url) => {
+      callCount++;
+      if (callCount === 1) return { ok: true, text: async () => FIXTURES.empty };
+      return { ok: true, text: async () => FIXTURES.standard };
+    };
+    const results = await scrapeDailyHalachot(fetchFn, [
+      'https://ph.yhb.org.il/api/2026',
+      'https://ph.yhb.org.il/api/2025',
+    ]);
+    expect(results).toHaveLength(2);
+    expect(callCount).toBe(2);
+  });
+
+  it('falls back to main page when all API URLs fail', async () => {
+    let calledUrls = [];
+    const fetchFn = async (url) => {
+      calledUrls.push(url);
+      if (url.startsWith(DAILY_URL)) {
+        return { ok: true, text: async () => FIXTURES.standard };
+      }
+      return { ok: false, status: 404, text: async () => '' };
+    };
+    const results = await scrapeDailyHalachot(fetchFn, [
+      'https://ph.yhb.org.il/api/2026',
+    ]);
+    expect(results).toHaveLength(2);
+    // Should have tried API URL + main page fallback
+    expect(calledUrls).toHaveLength(2);
+    expect(calledUrls[1]).toBe(DAILY_URL);
+  });
+
+  it('throws descriptive error when all sources fail', async () => {
+    const fetchFn = mockFetchFail(500);
+    await expect(
+      scrapeDailyHalachot(fetchFn, [
+        'https://ph.yhb.org.il/api/2026',
+        'https://ph.yhb.org.il/api/2025',
+      ]),
+    ).rejects.toThrow(/No halacha links found after trying 3 sources/);
+  });
+
+  it('error message lists all failed URLs', async () => {
+    const fetchFn = mockFetchFail(503);
+    try {
+      await scrapeDailyHalachot(fetchFn, [
+        'https://ph.yhb.org.il/api/a',
+        'https://ph.yhb.org.il/api/b',
+      ]);
+      expect.unreachable('should have thrown');
+    } catch (e) {
+      expect(e.message).toContain('api/a');
+      expect(e.message).toContain('api/b');
+      expect(e.message).toContain(DAILY_URL);
+    }
+  });
+
+  it('handles mix of network errors and HTTP errors', async () => {
+    let callCount = 0;
+    const fetchFn = async (url) => {
+      callCount++;
+      if (callCount === 1) throw new Error('ECONNREFUSED');
+      if (callCount === 2) return { ok: false, status: 403, text: async () => '' };
+      return { ok: true, text: async () => FIXTURES.standard };
+    };
+    const results = await scrapeDailyHalachot(fetchFn, [
+      'https://ph.yhb.org.il/api/a',
+      'https://ph.yhb.org.il/api/b',
+      'https://ph.yhb.org.il/api/c',
+    ]);
+    expect(results).toHaveLength(2);
+    expect(callCount).toBe(3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 3c. DYNAMIC API URL GENERATION (dailyApiUrls)
+// ---------------------------------------------------------------------------
+
+describe('Dynamic API URL generation — dailyApiUrls()', () => {
+  it('generates current year URL as first candidate', () => {
+    const year = new Date().getFullYear();
+    const urls = dailyApiUrls();
+    expect(urls[0]).toContain(`pninayomit-${year}`);
+  });
+
+  it('generates previous year URL as second candidate', () => {
+    const year = new Date().getFullYear();
+    const urls = dailyApiUrls();
+    expect(urls[1]).toContain(`pninayomit-${year - 1}`);
+  });
+
+  it('generates yearless URL as third candidate', () => {
+    const urls = dailyApiUrls();
+    expect(urls[2]).toBe(
+      `${BASE}/wp-content/plugins/db-connect/pninayomit/he_py.php`,
+    );
+  });
+
+  it('returns exactly 3 candidates', () => {
+    const urls = dailyApiUrls();
+    expect(urls).toHaveLength(3);
+  });
+
+  it('accepts year override for testing', () => {
+    const urls = dailyApiUrls(2026);
+    expect(urls[0]).toContain('pninayomit-2026');
+    expect(urls[1]).toContain('pninayomit-2025');
+  });
+
+  it('all URLs start with the base domain', () => {
+    const urls = dailyApiUrls();
+    for (const url of urls) {
+      expect(url.startsWith(BASE)).toBe(true);
+    }
+  });
+
+  it('all URLs end with he_py.php', () => {
+    const urls = dailyApiUrls();
+    for (const url of urls) {
+      expect(url.endsWith('/he_py.php')).toBe(true);
+    }
   });
 });
 
@@ -502,8 +749,8 @@ describe('Daily broadcast flow', () => {
     addSub.run(300);
     removeSub.run(200); // inactive
 
-    // Scrape
-    const halachot = scrapeDailyHalachot(FIXTURES.standard);
+    // Parse
+    const halachot = parseHalachot(FIXTURES.standard);
     expect(halachot).toHaveLength(2);
 
     // Resolve active subscribers
@@ -694,29 +941,22 @@ describe('Configuration validation', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 9. DYNAMIC API URL GENERATION
+// 9. DAILY_API_URL ENV OVERRIDE
 // ---------------------------------------------------------------------------
 
-describe('Dynamic API URL generation', () => {
-  it('generates the correct URL for the current year', () => {
-    const year = new Date().getFullYear();
-    const url = `${BASE}/wp-content/plugins/db-connect/pninayomit-${year}/he_py.php`;
-    expect(url).toContain(`pninayomit-${year}`);
-    expect(url.startsWith('https://ph.yhb.org.il/')).toBe(true);
-    expect(url.endsWith('/he_py.php')).toBe(true);
-  });
-
+describe('DAILY_API_URL env override', () => {
   it('respects DAILY_API_URL override when set', () => {
     const override = 'https://ph.yhb.org.il/custom/api.php';
-    const url = override || `${BASE}/wp-content/plugins/db-connect/pninayomit-2025/he_py.php`;
-    expect(url).toBe(override);
+    // When override is set, dailyApiUrls() in bot.js returns [override]
+    const urls = override ? [override] : dailyApiUrls();
+    expect(urls).toEqual([override]);
   });
 
-  it('falls back to derived URL when override is not set', () => {
+  it('falls back to derived URLs when override is not set', () => {
     const override = undefined;
-    const year = new Date().getFullYear();
-    const url = override || `${BASE}/wp-content/plugins/db-connect/pninayomit-${year}/he_py.php`;
-    expect(url).toContain(`pninayomit-${year}`);
+    const urls = override ? [override] : dailyApiUrls();
+    expect(urls).toHaveLength(3);
+    expect(urls[0]).toContain(`pninayomit-${new Date().getFullYear()}`);
   });
 });
 
@@ -760,7 +1000,7 @@ describe('Edge cases', () => {
           פרק כו – הלכות שבת
         </a></h3>
       </div>`;
-    const results = scrapeDailyHalachot(html);
+    const results = parseHalachot(html);
     expect(results[0].title).toBe('פרק כו – הלכות שבת');
     expect(results[0].title).not.toMatch(/^\s|\s$/);
   });
@@ -770,7 +1010,7 @@ describe('Edge cases', () => {
       <div class="ym-hala-1">
         <h3><a href="https://ph.yhb.org.il/20-26-12/"></a></h3>
       </div>`;
-    const results = scrapeDailyHalachot(html);
+    const results = parseHalachot(html);
     expect(results[0].title).toBe('הלכה');
   });
 
@@ -779,7 +1019,7 @@ describe('Edge cases', () => {
       <div class="ym-hala-1">
         <h3><a>Some Title</a></h3>
       </div>`;
-    const results = scrapeDailyHalachot(html);
+    const results = parseHalachot(html);
     expect(results[0].url).toBe(DAILY_URL);
   });
 
