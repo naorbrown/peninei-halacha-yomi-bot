@@ -37,7 +37,6 @@ const FIXTURES = {
 
 const BASE = 'https://ph.yhb.org.il';
 const DAILY_URL = `${BASE}/pninayomit/`;
-const UA = 'PenineiHalachaYomiBot/1.0';
 const ALLOWED_HOSTS = ['ph.yhb.org.il', 'yhb.org.il', 'cdn1.yhb.org.il'];
 
 // ---------------------------------------------------------------------------
@@ -1033,5 +1032,29 @@ describe('Edge cases', () => {
     const longTitle = 'א'.repeat(10000);
     const escaped = escMd(longTitle);
     expect(escaped).toHaveLength(10000);
+  });
+
+  it('returns empty when HTML is a Cloudflare challenge page', () => {
+    const cloudflareHtml = `
+      <!DOCTYPE html>
+      <html><head><title>Just a moment...</title></head>
+      <body>
+        <div id="challenge-running">Checking your browser...</div>
+        <noscript>Enable JavaScript and cookies to continue</noscript>
+      </body></html>`;
+    const results = parseHalachot(cloudflareHtml);
+    expect(results).toHaveLength(0);
+  });
+
+  it('handles audio URL passed as string (not InputFile) in message payload', () => {
+    const h = {
+      url: 'https://ph.yhb.org.il/20-26-12/',
+      title: 'Test Halacha',
+      audioUrl: 'https://cdn1.yhb.org.il/mp3/20-26-12.mp3',
+    };
+    // Verify the audioUrl is a plain string suitable for Telegram API
+    expect(typeof h.audioUrl).toBe('string');
+    expect(h.audioUrl).toMatch(/^https:\/\//);
+    expect(isAllowedUrl(h.audioUrl)).toBe(true);
   });
 });
