@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 require('dotenv').config();
-const { Bot, InputFile } = require('grammy');
+const { Bot } = require('grammy');
 const cron = require('node-cron');
 const cheerio = require('cheerio');
 const Database = require('better-sqlite3');
@@ -12,8 +12,17 @@ const TOKEN = process.env.BOT_TOKEN;
 const DB_PATH = process.env.DB_PATH || './data/bot.db';
 const BASE = 'https://ph.yhb.org.il';
 const DAILY_URL = `${BASE}/pninayomit/`;
-const UA = 'PenineiHalachaYomiBot/1.0';
 const ALLOWED_HOSTS = ['ph.yhb.org.il', 'yhb.org.il', 'cdn1.yhb.org.il'];
+
+// Browser-like headers to avoid bot-detection blocking (e.g. Cloudflare)
+const FETCH_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'he-IL,he;q=0.9,en-US;q=0.8,en;q=0.7',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Connection': 'keep-alive',
+    'Referer': `${BASE}/`,
+};
 
 if (!TOKEN || TOKEN === 'your_bot_token_here') {
     console.error('Set BOT_TOKEN in .env'); process.exit(1);
@@ -66,7 +75,11 @@ function dailyApiUrls() {
 }
 
 async function fetchHTML(url) {
-    const r = await fetch(url, { headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(15000) });
+    const r = await fetch(url, {
+        headers: FETCH_HEADERS,
+        signal: AbortSignal.timeout(15000),
+        redirect: 'follow',
+    });
     if (!r.ok) throw new Error(`HTTP ${r.status} for ${url}`);
     return r.text();
 }
@@ -202,7 +215,10 @@ async function sendHalachot(chatId, halachot) {
         const caption = `📖 *הלכה ${i === 0 ? 'א' : 'ב'}:* ${escMd(h.title)}\n🔗 [לקריאה באתר](${safeUrl})`;
         if (h.audioUrl) {
             try {
-                await bot.api.sendAudio(chatId, new InputFile(new URL(h.audioUrl)), {
+                // Pass URL string directly so Telegram downloads the file itself.
+                // This avoids bot-detection issues on the CDN (Cloudflare etc.)
+                // that would block Grammy's own fetch.
+                await bot.api.sendAudio(chatId, h.audioUrl, {
                     caption, parse_mode: 'Markdown', title: h.title, performer: 'פניני הלכה',
                 });
                 continue;
