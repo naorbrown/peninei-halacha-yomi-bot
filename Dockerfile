@@ -7,7 +7,7 @@ RUN npm ci --production
 FROM node:20-alpine
 WORKDIR /app
 COPY --from=builder /app/node_modules ./node_modules
-COPY bot.js ./
+COPY bot.js lib.js ./
 RUN mkdir data
 ENV NODE_ENV=production
 CMD ["node", "bot.js"]

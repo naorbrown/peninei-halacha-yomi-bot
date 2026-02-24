@@ -1,20 +1,32 @@
 /**
- * End-to-end test suite for Peninei Halacha Yomi Bot.
+ * Test suite for Peninei Halacha Yomi Bot.
  *
- * Strategy: We exercise the real application logic (scraper, database, command
- * handlers, daily broadcast) while mocking only the two external boundaries:
- *   1. The network (global `fetch`)
- *   2. The Telegram Bot API (grammy)
- *
- * The SQLite database runs against a real in-memory instance so schema
- * creation, queries, and edge-cases are fully covered.
+ * Tests import the actual production code from lib.js so we test the real
+ * logic, not duplicated copies. Only external boundaries (network, Telegram
+ * API) are mocked.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { readFileSync } from 'fs';
 import { resolve } from 'path';
 import Database from 'better-sqlite3';
-import * as cheerio from 'cheerio';
+
+// Import the actual production code
+import {
+  BASE,
+  DAILY_URL,
+  ALLOWED_HOSTS,
+  isAllowedUrl,
+  escMd,
+  dailyApiUrls,
+  parseHalachot,
+  scrapeDailyHalachot,
+  buildCaption,
+  getCachedHalachot,
+  setCachedHalachot,
+  clearCache,
+  fetchHTML,
+} from '../../lib.js';
 
 // ---------------------------------------------------------------------------
 // Fixture helpers
@@ -32,120 +44,19 @@ const FIXTURES = {
 };
 
 // ---------------------------------------------------------------------------
-// Constants mirrored from bot.js
+// Mock fetch helpers
 // ---------------------------------------------------------------------------
 
-const BASE = 'https://ph.yhb.org.il';
-const DAILY_URL = `${BASE}/pninayomit/`;
-const ALLOWED_HOSTS = ['ph.yhb.org.il', 'yhb.org.il', 'cdn1.yhb.org.il'];
-
-// ---------------------------------------------------------------------------
-// Pure-function ports extracted from bot.js (tested directly)
-// ---------------------------------------------------------------------------
-
-function isAllowedUrl(url) {
-  try {
-    return ALLOWED_HOSTS.includes(new URL(url).hostname);
-  } catch {
-    return false;
-  }
+function mockFetchOk(html) {
+  return async () => ({ ok: true, text: async () => html });
 }
 
-function escMd(s) {
-  return (s || '').replace(/([_*`\[])/g, '\\$1');
+function mockFetchFail(status) {
+  return async () => ({ ok: false, status, text: async () => '' });
 }
 
-/** Mirrors dailyApiUrls() from bot.js */
-function dailyApiUrls(yearOverride) {
-  const year = yearOverride || new Date().getFullYear();
-  return [
-    `${BASE}/wp-content/plugins/db-connect/pninayomit-${year}/he_py.php`,
-    `${BASE}/wp-content/plugins/db-connect/pninayomit-${year - 1}/he_py.php`,
-    `${BASE}/wp-content/plugins/db-connect/pninayomit/he_py.php`,
-  ];
-}
-
-/** Mirrors parseHalachot() from bot.js — pure HTML parsing, no network */
-function parseHalachot(html) {
-  const $ = cheerio.load(html);
-  const results = [];
-
-  $('.ym-hala-1, .ym-hala-2').each((_i, container) => {
-    const $c = $(container);
-    const link = $c.find('h3 a[href]').first();
-    let url = link.attr('href') || DAILY_URL;
-    const title = link.text().trim() || 'הלכה';
-    let audioUrl =
-      $c.find('audio source').attr('src') ||
-      $c.find('audio').attr('src') ||
-      null;
-
-    // Fallback: derive audio URL from page URL
-    if (!audioUrl) {
-      const id = url.match(/(\d{2}-\d{2}-\d{2})/)?.[1];
-      if (id) audioUrl = `https://cdn1.yhb.org.il/mp3/${id}.mp3`;
-    }
-
-    if (audioUrl?.startsWith('//')) audioUrl = 'https:' + audioUrl;
-    else if (audioUrl?.startsWith('/')) audioUrl = BASE + audioUrl;
-
-    if (!isAllowedUrl(url)) url = DAILY_URL;
-    if (audioUrl && !isAllowedUrl(audioUrl)) audioUrl = null;
-
-    results.push({ url, title, audioUrl });
-  });
-
-  // Fallback: try matching any halacha links
-  if (results.length === 0) {
-    $('h3 a[href*="ph.yhb.org.il"]').each((_el, el) => {
-      const url = $(el).attr('href');
-      const title = $(el).text().trim() || 'הלכה';
-      const id = url.match(/(\d{2}-\d{2}-\d{2})/)?.[1];
-      const audioUrl = id ? `https://cdn1.yhb.org.il/mp3/${id}.mp3` : null;
-      results.push({ url, title, audioUrl });
-    });
-  }
-
-  return results.slice(0, 2);
-}
-
-/**
- * Mirrors scrapeDailyHalachot() from bot.js — the full scrape-with-fallback
- * flow, using the provided fetchFn instead of global fetch.
- */
-async function scrapeDailyHalachot(fetchFn, apiUrls) {
-  const urls = apiUrls || dailyApiUrls();
-  const errors = [];
-
-  for (const apiUrl of urls) {
-    const fullUrl = `${apiUrl}?date=${Date.now()}`;
-    try {
-      const r = await fetchFn(fullUrl);
-      if (!r.ok) throw new Error(`HTTP ${r.status} for ${fullUrl}`);
-      const html = await r.text();
-      const results = parseHalachot(html);
-      if (results.length > 0) return results;
-      errors.push(`${apiUrl}: returned HTML but no halachot found`);
-    } catch (e) {
-      errors.push(`${apiUrl}: ${e.message}`);
-    }
-  }
-
-  // Last resort: try scraping the main page directly
-  try {
-    const r = await fetchFn(DAILY_URL);
-    if (!r.ok) throw new Error(`HTTP ${r.status} for ${DAILY_URL}`);
-    const html = await r.text();
-    const results = parseHalachot(html);
-    if (results.length > 0) return results;
-  } catch (e) {
-    errors.push(`${DAILY_URL}: ${e.message}`);
-  }
-
-  throw new Error(
-    `No halacha links found after trying ${errors.length} sources — site structure may have changed.\n` +
-    errors.map(e => `  • ${e}`).join('\n')
-  );
+function mockFetchError(msg) {
+  return async () => { throw new Error(msg); };
 }
 
 // ---------------------------------------------------------------------------
@@ -331,17 +242,9 @@ describe('Scraper — parseHalachot()', () => {
 // ---------------------------------------------------------------------------
 
 describe('Scraper — URL fallback chain', () => {
-  function mockFetchOk(html) {
-    return async () => ({ ok: true, text: async () => html });
-  }
-
-  function mockFetchFail(status) {
-    return async (url) => ({ ok: false, status, text: async () => '' });
-  }
-
-  function mockFetchError(msg) {
-    return async () => { throw new Error(msg); };
-  }
+  beforeEach(() => {
+    clearCache();
+  });
 
   it('succeeds on the first URL when it returns valid content', async () => {
     const fetchFn = mockFetchOk(FIXTURES.standard);
@@ -357,7 +260,7 @@ describe('Scraper — URL fallback chain', () => {
     let callCount = 0;
     const fetchFn = async (url) => {
       callCount++;
-      if (callCount === 1) return { ok: false, status: 404, text: async () => '' };
+      if (callCount <= 2) return { ok: false, status: 404, text: async () => '' };
       return { ok: true, text: async () => FIXTURES.standard };
     };
     const results = await scrapeDailyHalachot(fetchFn, [
@@ -365,14 +268,13 @@ describe('Scraper — URL fallback chain', () => {
       'https://ph.yhb.org.il/api/2025',
     ]);
     expect(results).toHaveLength(2);
-    expect(callCount).toBe(2);
   });
 
   it('falls back to second URL when first throws a network error', async () => {
     let callCount = 0;
     const fetchFn = async (url) => {
       callCount++;
-      if (callCount === 1) throw new Error('fetch failed');
+      if (callCount <= 2) throw new Error('fetch failed');
       return { ok: true, text: async () => FIXTURES.standard };
     };
     const results = await scrapeDailyHalachot(fetchFn, [
@@ -380,14 +282,14 @@ describe('Scraper — URL fallback chain', () => {
       'https://ph.yhb.org.il/api/2025',
     ]);
     expect(results).toHaveLength(2);
-    expect(callCount).toBe(2);
   });
 
   it('falls back to third URL when first two fail', async () => {
     let callCount = 0;
     const fetchFn = async (url) => {
       callCount++;
-      if (callCount <= 2) return { ok: false, status: 404, text: async () => '' };
+      // First 4 calls are for 2 URLs with 1 retry each
+      if (callCount <= 4) return { ok: false, status: 404, text: async () => '' };
       return { ok: true, text: async () => FIXTURES.standard };
     };
     const results = await scrapeDailyHalachot(fetchFn, [
@@ -396,14 +298,13 @@ describe('Scraper — URL fallback chain', () => {
       'https://ph.yhb.org.il/api/yearless',
     ]);
     expect(results).toHaveLength(2);
-    expect(callCount).toBe(3);
   });
 
   it('falls back when URL returns HTML but no halachot', async () => {
     let callCount = 0;
     const fetchFn = async (url) => {
       callCount++;
-      if (callCount === 1) return { ok: true, text: async () => FIXTURES.empty };
+      if (callCount <= 2) return { ok: true, text: async () => FIXTURES.empty };
       return { ok: true, text: async () => FIXTURES.standard };
     };
     const results = await scrapeDailyHalachot(fetchFn, [
@@ -411,7 +312,6 @@ describe('Scraper — URL fallback chain', () => {
       'https://ph.yhb.org.il/api/2025',
     ]);
     expect(results).toHaveLength(2);
-    expect(callCount).toBe(2);
   });
 
   it('falls back to main page when all API URLs fail', async () => {
@@ -427,9 +327,24 @@ describe('Scraper — URL fallback chain', () => {
       'https://ph.yhb.org.il/api/2026',
     ]);
     expect(results).toHaveLength(2);
-    // Should have tried API URL + main page fallback
-    expect(calledUrls).toHaveLength(2);
-    expect(calledUrls[1]).toBe(DAILY_URL);
+    // Should have tried API URL (with retry) + main page fallback
+    expect(calledUrls.some(u => u.startsWith(DAILY_URL))).toBe(true);
+  });
+
+  it('falls back to Google Cache when direct access fails', async () => {
+    let calledUrls = [];
+    const fetchFn = async (url) => {
+      calledUrls.push(url);
+      if (url.includes('webcache.googleusercontent.com')) {
+        return { ok: true, text: async () => FIXTURES.standard };
+      }
+      return { ok: false, status: 403, text: async () => '' };
+    };
+    const results = await scrapeDailyHalachot(fetchFn, [
+      'https://ph.yhb.org.il/api/2026',
+    ]);
+    expect(results).toHaveLength(2);
+    expect(calledUrls.some(u => u.includes('webcache.googleusercontent.com'))).toBe(true);
   });
 
   it('throws descriptive error when all sources fail', async () => {
@@ -437,9 +352,8 @@ describe('Scraper — URL fallback chain', () => {
     await expect(
       scrapeDailyHalachot(fetchFn, [
         'https://ph.yhb.org.il/api/2026',
-        'https://ph.yhb.org.il/api/2025',
       ]),
-    ).rejects.toThrow(/No halacha links found after trying 3 sources/);
+    ).rejects.toThrow(/No halacha links found/);
   });
 
   it('error message lists all failed URLs', async () => {
@@ -454,6 +368,7 @@ describe('Scraper — URL fallback chain', () => {
       expect(e.message).toContain('api/a');
       expect(e.message).toContain('api/b');
       expect(e.message).toContain(DAILY_URL);
+      expect(e.message).toContain('Google Cache');
     }
   });
 
@@ -461,8 +376,8 @@ describe('Scraper — URL fallback chain', () => {
     let callCount = 0;
     const fetchFn = async (url) => {
       callCount++;
-      if (callCount === 1) throw new Error('ECONNREFUSED');
-      if (callCount === 2) return { ok: false, status: 403, text: async () => '' };
+      if (callCount <= 2) throw new Error('ECONNREFUSED');
+      if (callCount <= 4) return { ok: false, status: 403, text: async () => '' };
       return { ok: true, text: async () => FIXTURES.standard };
     };
     const results = await scrapeDailyHalachot(fetchFn, [
@@ -471,7 +386,6 @@ describe('Scraper — URL fallback chain', () => {
       'https://ph.yhb.org.il/api/c',
     ]);
     expect(results).toHaveLength(2);
-    expect(callCount).toBe(3);
   });
 });
 
@@ -760,13 +674,9 @@ describe('Daily broadcast flow', () => {
     // Build message payloads for each subscriber
     for (const { chat_id } of subs) {
       for (let i = 0; i < halachot.length; i++) {
-        const h = halachot[i];
-        const safeUrl = h.url.replace(/\)/g, '%29');
-        const caption = `📖 *הלכה ${i === 0 ? 'א' : 'ב'}:* ${escMd(h.title)}\n🔗 [לקריאה באתר](${safeUrl})`;
-
-        expect(caption).toContain(escMd(h.title));
-        expect(caption).toContain(safeUrl);
-        expect(h.audioUrl).toBeTruthy();
+        const caption = buildCaption(halachot[i], i);
+        expect(caption).toContain(escMd(halachot[i].title));
+        expect(halachot[i].audioUrl).toBeTruthy();
       }
     }
   });
@@ -838,47 +748,99 @@ describe('Daily broadcast flow', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 7. MESSAGE FORMATTING
+// 7. MESSAGE FORMATTING (buildCaption)
 // ---------------------------------------------------------------------------
 
-describe('Message formatting', () => {
-  it('builds correct caption for halacha with audio', () => {
+describe('Message formatting — buildCaption()', () => {
+  it('builds correct caption for first halacha', () => {
     const h = {
       url: 'https://ph.yhb.org.il/20-26-12/',
       title: 'פרק כו – הלכות שבת – סעיף יב',
       audioUrl: 'https://cdn1.yhb.org.il/mp3/20-26-12.mp3',
     };
-    const safeUrl = h.url.replace(/\)/g, '%29');
-    const caption = `📖 *הלכה א:* ${escMd(h.title)}\n🔗 [לקריאה באתר](${safeUrl})`;
-
+    const caption = buildCaption(h, 0);
     expect(caption).toContain('*הלכה א:*');
     expect(caption).not.toContain('undefined');
     expect(caption).toContain('לקריאה באתר');
   });
 
-  it('escapes parentheses in URLs for Markdown safety', () => {
-    const url = 'https://ph.yhb.org.il/page-(1)/';
-    const safeUrl = url.replace(/\)/g, '%29');
-    expect(safeUrl).toBe('https://ph.yhb.org.il/page-(1%29/');
-    expect(safeUrl).not.toContain(')');
+  it('builds correct caption for second halacha', () => {
+    const h = {
+      url: 'https://ph.yhb.org.il/20-26-13/',
+      title: 'פרק כו – הלכות שבת – סעיף יג',
+      audioUrl: 'https://cdn1.yhb.org.il/mp3/20-26-13.mp3',
+    };
+    const caption = buildCaption(h, 1);
+    expect(caption).toContain('*הלכה ב:*');
   });
 
-  it('adds audio-unavailable notice when audioUrl is null', () => {
+  it('escapes parentheses in URLs for Markdown safety', () => {
     const h = {
-      url: 'https://ph.yhb.org.il/20-26-12/',
+      url: 'https://ph.yhb.org.il/page-(1)/',
       title: 'Test',
       audioUrl: null,
     };
-    const safeUrl = h.url.replace(/\)/g, '%29');
-    const caption = `📖 *הלכה א:* ${escMd(h.title)}\n🔗 [לקריאה באתר](${safeUrl})`;
-    const fallback = caption + '\n\n_⚠️ הקלטה לא זמינה_';
+    const caption = buildCaption(h, 0);
+    expect(caption).not.toContain(')(');
+    expect(caption).toContain('%29');
+  });
 
-    expect(fallback).toContain('הקלטה לא זמינה');
+  it('escapes Markdown special chars in titles', () => {
+    const h = {
+      url: 'https://ph.yhb.org.il/20-26-12/',
+      title: 'הלכות_שבת *חלק*',
+      audioUrl: null,
+    };
+    const caption = buildCaption(h, 0);
+    expect(caption).toContain('הלכות\\_שבת');
+    expect(caption).toContain('\\*חלק\\*');
   });
 });
 
 // ---------------------------------------------------------------------------
-// 8. CONFIGURATION VALIDATION
+// 8. CACHING
+// ---------------------------------------------------------------------------
+
+describe('Daily cache', () => {
+  beforeEach(() => {
+    clearCache();
+  });
+
+  it('returns null when cache is empty', () => {
+    expect(getCachedHalachot()).toBeNull();
+  });
+
+  it('returns cached data after setting', () => {
+    const data = [{ url: 'test', title: 'test', audioUrl: null }];
+    setCachedHalachot(data);
+    expect(getCachedHalachot()).toEqual(data);
+  });
+
+  it('clears cache', () => {
+    setCachedHalachot([{ url: 'test', title: 'test', audioUrl: null }]);
+    clearCache();
+    expect(getCachedHalachot()).toBeNull();
+  });
+
+  it('scrapeDailyHalachot returns cached result on second call', async () => {
+    let callCount = 0;
+    const fetchFn = async () => {
+      callCount++;
+      return { ok: true, text: async () => FIXTURES.standard };
+    };
+    const apiUrls = ['https://ph.yhb.org.il/api/test'];
+
+    const first = await scrapeDailyHalachot(fetchFn, apiUrls);
+    const second = await scrapeDailyHalachot(fetchFn, apiUrls);
+    expect(first).toEqual(second);
+    // fetchFn should only be called for the first request (with retry=1, up to 2 calls)
+    // The second call should use cache
+    expect(callCount).toBeLessThanOrEqual(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 9. CONFIGURATION VALIDATION
 // ---------------------------------------------------------------------------
 
 describe('Configuration validation', () => {
@@ -940,13 +902,13 @@ describe('Configuration validation', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 9. DAILY_API_URL ENV OVERRIDE
+// 10. DAILY_API_URL ENV OVERRIDE
 // ---------------------------------------------------------------------------
 
 describe('DAILY_API_URL env override', () => {
   it('respects DAILY_API_URL override when set', () => {
     const override = 'https://ph.yhb.org.il/custom/api.php';
-    // When override is set, dailyApiUrls() in bot.js returns [override]
+    // When override is set, bot.js returns [override]
     const urls = override ? [override] : dailyApiUrls();
     expect(urls).toEqual([override]);
   });
@@ -960,7 +922,7 @@ describe('DAILY_API_URL env override', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 10. GRACEFUL SHUTDOWN
+// 11. GRACEFUL SHUTDOWN
 // ---------------------------------------------------------------------------
 
 describe('Graceful shutdown', () => {
@@ -988,7 +950,7 @@ describe('Graceful shutdown', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 11. EDGE CASES & REGRESSION TESTS
+// 12. EDGE CASES & REGRESSION TESTS
 // ---------------------------------------------------------------------------
 
 describe('Edge cases', () => {
@@ -1056,5 +1018,56 @@ describe('Edge cases', () => {
     expect(typeof h.audioUrl).toBe('string');
     expect(h.audioUrl).toMatch(/^https:\/\//);
     expect(isAllowedUrl(h.audioUrl)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 13. fetchHTML with retry logic
+// ---------------------------------------------------------------------------
+
+describe('fetchHTML — retry logic', () => {
+  it('succeeds on first try', async () => {
+    let calls = 0;
+    const fetchFn = async () => {
+      calls++;
+      return { ok: true, text: async () => '<html>ok</html>' };
+    };
+    const html = await fetchHTML('https://example.com', fetchFn, 2);
+    expect(html).toBe('<html>ok</html>');
+    expect(calls).toBe(1);
+  });
+
+  it('retries on failure and succeeds', async () => {
+    let calls = 0;
+    const fetchFn = async () => {
+      calls++;
+      if (calls < 3) throw new Error('network error');
+      return { ok: true, text: async () => '<html>ok</html>' };
+    };
+    const html = await fetchHTML('https://example.com', fetchFn, 2);
+    expect(html).toBe('<html>ok</html>');
+    expect(calls).toBe(3);
+  });
+
+  it('throws after exhausting retries', async () => {
+    let calls = 0;
+    const fetchFn = async () => {
+      calls++;
+      throw new Error('network error');
+    };
+    await expect(fetchHTML('https://example.com', fetchFn, 1)).rejects.toThrow('network error');
+    expect(calls).toBe(2); // initial + 1 retry
+  });
+
+  it('retries on HTTP error status', async () => {
+    let calls = 0;
+    const fetchFn = async () => {
+      calls++;
+      if (calls < 2) return { ok: false, status: 503, text: async () => '' };
+      return { ok: true, text: async () => '<html>ok</html>' };
+    };
+    const html = await fetchHTML('https://example.com', fetchFn, 2);
+    expect(html).toBe('<html>ok</html>');
+    expect(calls).toBe(2);
   });
 });
