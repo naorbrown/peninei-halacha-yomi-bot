@@ -1,7 +1,13 @@
 services:
   bot:
     build: .
+    container_name: peninei-halacha-yomi-bot
     restart: unless-stopped
     env_file: .env
     volumes:
-      - ./data:/app/data
+      - ./.github/state:/app/.github/state
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
