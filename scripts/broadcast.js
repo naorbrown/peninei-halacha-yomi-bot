@@ -3,7 +3,7 @@
  * Daily Broadcast Script
  *
  * Run by GitHub Actions on a daily schedule.
- * Scrapes today's halachot and broadcasts to all subscribers + optional channel.
+ * Scrapes today's halachot and broadcasts to admin + optional channel + subscribers.
  *
  * Usage: node scripts/broadcast.js
  * Env:   TELEGRAM_BOT_TOKEN, ADMIN_CHAT_ID, TELEGRAM_CHANNEL_ID (optional)
@@ -12,10 +12,10 @@
 
 import TelegramBot from 'node-telegram-bot-api';
 import { scrapeDailyHalachot, dailyApiUrls, clearCache } from '../src/scraper.js';
-import { sendDailyContent } from '../src/sender.js';
 import { loadSubscribers, removeSubscriber } from '../src/utils/subscribers.js';
 import { wasBroadcastSentToday, markBroadcastSent } from '../src/utils/broadcastState.js';
 import { isIsraelBroadcastWindow } from '../src/utils/israelTime.js';
+import { runBroadcastDelivery } from '../src/broadcastOrchestrator.js';
 
 // --- Config ---
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
@@ -37,10 +37,6 @@ if (ADMIN_CHAT_ID && CHANNEL_ID && String(ADMIN_CHAT_ID) === String(CHANNEL_ID))
 }
 
 const bot = new TelegramBot(BOT_TOKEN);
-
-function sleep(ms) {
-  return new Promise(r => setTimeout(r, ms));
-}
 
 /**
  * Main broadcast function
@@ -70,77 +66,28 @@ async function runBroadcast() {
   console.log(`Found ${halachot.length} halachot: ${halachot.map(h => h.title).join(', ')}`);
   console.log(`Audio URLs: ${halachot.map(h => h.audioUrl || '(none)').join(', ')}`);
 
-  const stats = {
-    channel: false,
-    channelAudio: 0,
-    subscribers: { sent: 0, failed: 0, removed: 0, audioDelivered: 0, textOnly: 0 },
-  };
-
-  // --- Channel broadcast ---
-  if (CHANNEL_ID) {
-    try {
-      const result = await sendDailyContent(bot, CHANNEL_ID, halachot, fetch);
-      stats.channel = true;
-      stats.channelAudio = result.audioCount;
-      console.log(`Channel ${CHANNEL_ID}: sent (audio: ${result.audioCount}/${halachot.length})`);
-    } catch (e) {
-      console.error(`Channel ${CHANNEL_ID} failed: ${e.message}`);
-    }
-  }
-
-  // --- Subscriber broadcast ---
+  // --- Deliver ---
   const subscribers = await loadSubscribers();
-  console.log(`Broadcasting to ${subscribers.length} subscribers...`);
+  console.log(`Broadcasting to admin + ${subscribers.length} subscribers...`);
 
-  for (const chatId of subscribers) {
-    try {
-      const result = await sendDailyContent(bot, chatId, halachot, fetch);
-      stats.subscribers.sent++;
-      stats.subscribers.audioDelivered += result.audioCount;
-      stats.subscribers.textOnly += result.textCount;
-    } catch (e) {
-      const errCode = e?.response?.body?.error_code;
-      if (errCode === 403) {
-        console.log(`Removing blocked/deactivated user ${chatId}`);
-        await removeSubscriber(chatId);
-        stats.subscribers.removed++;
-      } else if (errCode === 429) {
-        const retryAfter = e?.response?.body?.parameters?.retry_after ?? 30;
-        console.warn(`Rate limited, sleeping ${retryAfter}s`);
-        await sleep(retryAfter * 1000);
-        stats.subscribers.failed++;
-      } else {
-        console.error(`Failed for chat_id=${chatId}: ${e.message}`);
-        stats.subscribers.failed++;
-      }
-    }
-    await sleep(100); // Rate-limit between users
-  }
+  const { summary, anySuccess } = await runBroadcastDelivery({
+    bot,
+    halachot,
+    fetchFn: fetch,
+    adminChatId: ADMIN_CHAT_ID,
+    channelId: CHANNEL_ID,
+    subscribers,
+    removeSubscriber,
+  });
 
   // --- Mark as sent ---
-  const anySuccess = stats.channel || stats.subscribers.sent > 0;
   if (anySuccess) {
     await markBroadcastSent();
   }
 
-  // --- Summary ---
-  const totalMessages = subscribers.length * halachot.length;
-  const audioRate = totalMessages > 0
-    ? Math.round((stats.subscribers.audioDelivered / totalMessages) * 100)
-    : 0;
-
-  const summary =
-    `✅ Broadcast complete\n` +
-    `📖 ${halachot.map(h => h.title).join('\n📖 ')}\n` +
-    `📢 Channel: ${stats.channel ? `sent (🔊 ${stats.channelAudio}/${halachot.length} audio)` : 'skipped'}\n` +
-    `👥 Subscribers: ${stats.subscribers.sent}/${subscribers.length} sent` +
-    (stats.subscribers.failed ? `, ${stats.subscribers.failed} failed` : '') +
-    (stats.subscribers.removed ? `, ${stats.subscribers.removed} removed` : '') +
-    `\n🔊 Audio: ${stats.subscribers.audioDelivered} delivered, ${stats.subscribers.textOnly} text-only (${audioRate}% audio rate)`;
-
   console.log(summary);
 
-  // --- Notify admin ---
+  // --- Notify admin (text summary, separate from content delivery) ---
   if (ADMIN_CHAT_ID) {
     try {
       await bot.sendMessage(ADMIN_CHAT_ID, summary);
