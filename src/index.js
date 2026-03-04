@@ -16,7 +16,7 @@ import 'dotenv/config';
 import TelegramBot from 'node-telegram-bot-api';
 import { scrapeDailyHalachot, dailyApiUrls, clearCache, DAILY_URL } from './scraper.js';
 import { buildWelcomeMessage } from './messageBuilder.js';
-import { sendDailyContent } from './sender.js';
+import { sendDailyContent, sendSpedUpHalacha } from './sender.js';
 import { addSubscriber, removeSubscriber } from './utils/subscribers.js';
 import { createRateLimiter } from './utils/rateLimiter.js';
 
@@ -108,6 +108,35 @@ bot.on('message', async msg => {
     } catch (e) {
       await bot.sendMessage(chatId, `🚨 Failed: ${e.message}`).catch(() => {});
     }
+  }
+});
+
+// --- Speed control callback handler ---
+bot.on('callback_query', async (query) => {
+  const data = query.data;
+  if (!data?.startsWith('spd:')) return;
+
+  const chatId = query.message.chat.id;
+  const [, speedStr, indexStr] = data.split(':');
+  const speed = parseFloat(speedStr);
+  const index = parseInt(indexStr, 10);
+
+  if (![1.5, 2].includes(speed) || ![0, 1].includes(index)) {
+    return bot.answerCallbackQuery(query.id, { text: 'Invalid request' });
+  }
+
+  await bot.answerCallbackQuery(query.id, { text: `⏳ מכין ${speed}x...` });
+
+  try {
+    const halachot = await scrapeDailyHalachot(fetch, getApiUrls());
+    if (!halachot[index]) {
+      return bot.sendMessage(chatId, '⚠️ לא נמצאה הלכה.');
+    }
+    await sendSpedUpHalacha(bot, chatId, halachot[index], index, speed, fetch);
+    console.log(`[speed] chat=${chatId} speed=${speed}x index=${index}`);
+  } catch (err) {
+    console.error(`[speed] chat=${chatId} failed:`, err.message);
+    await bot.sendMessage(chatId, '⚠️ לא הצלחתי לשנות מהירות. נסו שוב מאוחר יותר.').catch(() => {});
   }
 });
 
