@@ -2,13 +2,23 @@
  * Sender tests — downloadAudio, sendHalacha, sendDailyContent
  *
  * Validates the three-strategy audio fallback chain:
- *   1. Download audio as buffer → upload to Telegram
- *   2. Pass URL to Telegram (Telegram fetches)
+ *   1. Download MP3 → convert to OGG Opus → sendVoice (native speed controls)
+ *   2. Pass URL to Telegram as sendAudio (no speed controls)
  *   3. Text-only fallback
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { downloadAudio, sendHalacha, sendDailyContent } from '../../src/sender.js';
+
+// Mock the OGG converter — returns a fake OGG buffer
+vi.mock('../../src/audioSpeed.js', () => ({
+  convertToOgg: vi.fn(async (buf) => {
+    // Return a buffer marked as OGG (same size, different content)
+    const ogg = Buffer.alloc(buf.length, 0xaa);
+    ogg._isOgg = true;
+    return ogg;
+  }),
+}));
 
 // --- Helpers ---
 
@@ -43,6 +53,7 @@ function mockFetchThrow(msg = 'network error') {
 /** Create a mock Telegram bot */
 function createMockBot() {
   return {
+    sendVoice: vi.fn(async () => ({ message_id: 1 })),
     sendAudio: vi.fn(async () => ({ message_id: 1 })),
     sendMessage: vi.fn(async () => ({ message_id: 2 })),
   };
@@ -161,31 +172,31 @@ describe('sendHalacha()', () => {
     bot = createMockBot();
   });
 
-  describe('Strategy 1: buffer upload (download + upload)', () => {
-    it('downloads audio and uploads buffer to Telegram', async () => {
+  describe('Strategy 1: voice upload (download + convert + sendVoice)', () => {
+    it('downloads audio, converts to OGG, and sends as voice', async () => {
       const fetchFn = mockFetchAudioOk();
 
       const result = await sendHalacha(bot, 123, HALACHA_WITH_AUDIO, 0, fetchFn);
 
       expect(result.audio).toBe(true);
-      expect(bot.sendAudio).toHaveBeenCalledTimes(1);
+      expect(bot.sendVoice).toHaveBeenCalledTimes(1);
+      expect(bot.sendAudio).not.toHaveBeenCalled();
       expect(bot.sendMessage).not.toHaveBeenCalled();
 
       // Verify buffer was passed (not URL string)
-      const audioArg = bot.sendAudio.mock.calls[0][1];
-      expect(Buffer.isBuffer(audioArg)).toBe(true);
+      const voiceArg = bot.sendVoice.mock.calls[0][1];
+      expect(Buffer.isBuffer(voiceArg)).toBe(true);
     });
 
-    it('passes correct file options for buffer upload', async () => {
+    it('passes correct file options for voice upload', async () => {
       const fetchFn = mockFetchAudioOk();
 
       await sendHalacha(bot, 123, HALACHA_WITH_AUDIO, 0, fetchFn);
 
-      const [, , options, fileOptions] = bot.sendAudio.mock.calls[0];
-      expect(fileOptions.filename).toBe('halacha-1.mp3');
-      expect(fileOptions.contentType).toBe('audio/mpeg');
+      const [, , options, fileOptions] = bot.sendVoice.mock.calls[0];
+      expect(fileOptions.filename).toBe('halacha-1.ogg');
+      expect(fileOptions.contentType).toBe('audio/ogg');
       expect(options.parse_mode).toBe('Markdown');
-      expect(options.performer).toBe('פניני הלכה');
     });
 
     it('uses correct filename based on index', async () => {
@@ -193,42 +204,41 @@ describe('sendHalacha()', () => {
 
       await sendHalacha(bot, 123, HALACHA_WITH_AUDIO, 1, fetchFn);
 
-      const [, , , fileOptions] = bot.sendAudio.mock.calls[0];
-      expect(fileOptions.filename).toBe('halacha-2.mp3');
+      const [, , , fileOptions] = bot.sendVoice.mock.calls[0];
+      expect(fileOptions.filename).toBe('halacha-2.ogg');
     });
   });
 
   describe('Strategy 2: URL passthrough (fallback)', () => {
-    it('falls back to URL when download fails', async () => {
+    it('falls back to sendAudio URL when voice upload fails', async () => {
       const fetchFn = mockFetchFail(404);
 
       const result = await sendHalacha(bot, 123, HALACHA_WITH_AUDIO, 0, fetchFn);
 
       expect(result.audio).toBe(true);
+      expect(bot.sendVoice).not.toHaveBeenCalled();
       expect(bot.sendAudio).toHaveBeenCalledTimes(1);
       expect(bot.sendMessage).not.toHaveBeenCalled();
 
-      // Verify URL string was passed (not buffer)
+      // Verify URL string was passed
       const audioArg = bot.sendAudio.mock.calls[0][1];
       expect(typeof audioArg).toBe('string');
       expect(audioArg).toBe(HALACHA_WITH_AUDIO.audioUrl);
     });
 
-    it('falls back to URL when buffer upload to Telegram fails', async () => {
+    it('falls back to URL when sendVoice to Telegram fails', async () => {
       const fetchFn = mockFetchAudioOk();
-      // First sendAudio (buffer) fails, second (URL) succeeds
-      bot.sendAudio
-        .mockRejectedValueOnce(new Error('upload failed'))
-        .mockResolvedValueOnce({ message_id: 1 });
+      bot.sendVoice.mockRejectedValueOnce(new Error('upload failed'));
 
       const result = await sendHalacha(bot, 123, HALACHA_WITH_AUDIO, 0, fetchFn);
 
       expect(result.audio).toBe(true);
-      expect(bot.sendAudio).toHaveBeenCalledTimes(2);
+      expect(bot.sendVoice).toHaveBeenCalledTimes(1);
+      expect(bot.sendAudio).toHaveBeenCalledTimes(1);
 
-      // Second call should use URL string
-      const secondAudioArg = bot.sendAudio.mock.calls[1][1];
-      expect(typeof secondAudioArg).toBe('string');
+      // sendAudio call should use URL string
+      const audioArg = bot.sendAudio.mock.calls[0][1];
+      expect(typeof audioArg).toBe('string');
     });
   });
 
@@ -239,6 +249,7 @@ describe('sendHalacha()', () => {
       const result = await sendHalacha(bot, 123, HALACHA_NO_AUDIO, 0, fetchFn);
 
       expect(result.audio).toBe(false);
+      expect(bot.sendVoice).not.toHaveBeenCalled();
       expect(bot.sendAudio).not.toHaveBeenCalled();
       expect(bot.sendMessage).toHaveBeenCalledTimes(1);
 
@@ -246,7 +257,7 @@ describe('sendHalacha()', () => {
       expect(msgText).toContain('הקלטה לא זמינה');
     });
 
-    it('sends text when both download and URL passthrough fail', async () => {
+    it('sends text when both voice and URL passthrough fail', async () => {
       const fetchFn = mockFetchFail(500);
       bot.sendAudio.mockRejectedValue(new Error('Telegram rejected URL'));
 
@@ -291,7 +302,7 @@ describe('sendHalacha()', () => {
       const result = await sendHalacha(bot, -100123456, HALACHA_WITH_AUDIO, 0, fetchFn);
 
       expect(result.audio).toBe(true);
-      expect(bot.sendAudio.mock.calls[0][0]).toBe(-100123456);
+      expect(bot.sendVoice.mock.calls[0][0]).toBe(-100123456);
     });
 
     it('works with string chat IDs (channels)', async () => {
@@ -300,7 +311,7 @@ describe('sendHalacha()', () => {
       const result = await sendHalacha(bot, '@mychannel', HALACHA_WITH_AUDIO, 0, fetchFn);
 
       expect(result.audio).toBe(true);
-      expect(bot.sendAudio.mock.calls[0][0]).toBe('@mychannel');
+      expect(bot.sendVoice.mock.calls[0][0]).toBe('@mychannel');
     });
   });
 });
@@ -324,7 +335,7 @@ describe('sendDailyContent()', () => {
 
     expect(result.audioCount).toBe(2);
     expect(result.textCount).toBe(0);
-    expect(bot.sendAudio).toHaveBeenCalledTimes(2);
+    expect(bot.sendVoice).toHaveBeenCalledTimes(2);
   });
 
   it('counts mixed audio and text correctly', async () => {
@@ -357,6 +368,7 @@ describe('sendDailyContent()', () => {
   });
 
   it('propagates sendMessage errors (text fallback failure)', async () => {
+    bot.sendVoice.mockRejectedValue(new Error('voice fail'));
     bot.sendAudio.mockRejectedValue(new Error('audio fail'));
     bot.sendMessage.mockRejectedValue(new Error('blocked by user'));
     const fetchFn = mockFetchFail(500);

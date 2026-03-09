@@ -1,8 +1,9 @@
 /**
- * Audio Speed Processor
+ * Audio Converter — MP3 to OGG Opus
  *
- * Uses ffmpeg's atempo filter to change playback speed of audio buffers.
- * Requires ffmpeg to be installed on the system.
+ * Converts MP3 buffers to OGG Opus format so Telegram's sendVoice
+ * can be used, which provides native speed controls for any duration.
+ * Requires ffmpeg with libopus support.
  */
 
 import { execFile } from 'node:child_process';
@@ -11,23 +12,16 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
 
-const ALLOWED_SPEEDS = [1.5, 2];
-
 /**
- * Speed up an audio buffer using ffmpeg's atempo filter.
+ * Convert an MP3 buffer to OGG Opus format.
  *
  * @param {Buffer} inputBuffer - Original MP3 audio buffer
- * @param {number} speed - Playback speed (1.5 or 2)
- * @returns {Promise<Buffer>} - Sped-up MP3 audio buffer
+ * @returns {Promise<Buffer>} - OGG Opus audio buffer
  */
-export async function changeSpeed(inputBuffer, speed) {
-  if (!ALLOWED_SPEEDS.includes(speed)) {
-    throw new Error(`Unsupported speed: ${speed}. Allowed: ${ALLOWED_SPEEDS.join(', ')}`);
-  }
-
+export async function convertToOgg(inputBuffer) {
   const id = randomBytes(6).toString('hex');
   const inputPath = join(tmpdir(), `ph-in-${id}.mp3`);
-  const outputPath = join(tmpdir(), `ph-out-${id}.mp3`);
+  const outputPath = join(tmpdir(), `ph-out-${id}.ogg`);
 
   try {
     await writeFile(inputPath, inputBuffer);
@@ -35,7 +29,11 @@ export async function changeSpeed(inputBuffer, speed) {
     await new Promise((resolve, reject) => {
       execFile('ffmpeg', [
         '-i', inputPath,
-        '-filter:a', `atempo=${speed}`,
+        '-c:a', 'libopus',
+        '-b:a', '48k',
+        '-vbr', 'on',
+        '-compression_level', '10',
+        '-application', 'voip',
         '-vn',
         '-y',
         outputPath,

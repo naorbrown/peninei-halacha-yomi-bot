@@ -2,8 +2,8 @@
  * Integration test — Full broadcast pipeline (E2E)
  *
  * Tests the complete flow: scrape HTML → parse halachot → download audio →
- * send via Telegram bot. All external I/O is mocked but the pipeline logic
- * is real.
+ * convert to OGG Opus → send via Telegram bot. All external I/O is mocked
+ * but the pipeline logic is real.
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -13,6 +13,11 @@ import { fileURLToPath } from 'url';
 
 import { scrapeDailyHalachot, clearCache } from '../../src/scraper.js';
 import { sendDailyContent } from '../../src/sender.js';
+
+// Mock the OGG converter
+vi.mock('../../src/audioSpeed.js', () => ({
+  convertToOgg: vi.fn(async (buf) => Buffer.alloc(buf.length, 0xaa)),
+}));
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -32,6 +37,7 @@ function fakeMp3(size = 5000) {
 /** Create a mock bot */
 function createBot() {
   return {
+    sendVoice: vi.fn(async () => ({ message_id: 1 })),
     sendAudio: vi.fn(async () => ({ message_id: 1 })),
     sendMessage: vi.fn(async () => ({ message_id: 2 })),
   };
@@ -77,7 +83,7 @@ function createPipelineFetch(html, audioOpts = { succeed: true }) {
 describe('Broadcast pipeline — full E2E', () => {
   beforeEach(() => clearCache());
 
-  it('scrapes HTML and sends audio buffers for both halachot', async () => {
+  it('scrapes HTML and sends voice messages for both halachot', async () => {
     const fetchFn = createPipelineFetch(FIXTURES.standard);
     const bot = createBot();
 
@@ -90,19 +96,19 @@ describe('Broadcast pipeline — full E2E', () => {
     // Step 2: Send
     const result = await sendDailyContent(bot, 123, halachot, fetchFn);
 
-    // Verify: both sent as audio
+    // Verify: both sent as voice
     expect(result.audioCount).toBe(2);
     expect(result.textCount).toBe(0);
-    expect(bot.sendAudio).toHaveBeenCalledTimes(2);
+    expect(bot.sendVoice).toHaveBeenCalledTimes(2);
     expect(bot.sendMessage).not.toHaveBeenCalled();
 
     // Verify: buffers were uploaded (not URLs)
-    for (const call of bot.sendAudio.mock.calls) {
+    for (const call of bot.sendVoice.mock.calls) {
       expect(Buffer.isBuffer(call[1])).toBe(true);
     }
   });
 
-  it('scrapes page without audio tags, derives URLs, and sends buffers', async () => {
+  it('scrapes page without audio tags, derives URLs, and sends voice messages', async () => {
     const fetchFn = createPipelineFetch(FIXTURES.noAudio);
     const bot = createBot();
 
@@ -127,17 +133,18 @@ describe('Broadcast pipeline — full E2E', () => {
     const audioFailFetch = createPipelineFetch(FIXTURES.standard, { succeed: false, status: 403 });
     const result = await sendDailyContent(bot, 789, halachot, audioFailFetch);
 
-    // Should still succeed via URL passthrough
+    // Should still succeed via URL passthrough (sendAudio)
     expect(result.audioCount).toBe(2);
     expect(result.textCount).toBe(0);
 
-    // Verify URL strings were passed (not buffers)
+    // Verify URL strings were passed via sendAudio (not sendVoice)
+    expect(bot.sendVoice).not.toHaveBeenCalled();
     for (const call of bot.sendAudio.mock.calls) {
       expect(typeof call[1]).toBe('string');
     }
   });
 
-  it('falls back to text when both download and URL passthrough fail', async () => {
+  it('falls back to text when both voice and URL passthrough fail', async () => {
     const scrapeFetch = createPipelineFetch(FIXTURES.standard);
     const bot = createBot();
     // URL passthrough also fails
@@ -160,7 +167,7 @@ describe('Broadcast pipeline — full E2E', () => {
     expect(msg1).toContain('הקלטה לא זמינה');
   });
 
-  it('handles mixed success: buffer for first, URL passthrough for second', async () => {
+  it('handles mixed success: voice for first, URL passthrough for second', async () => {
     const scrapeFetch = createPipelineFetch(FIXTURES.standard);
     const bot = createBot();
 
@@ -185,15 +192,16 @@ describe('Broadcast pipeline — full E2E', () => {
 
     const result = await sendDailyContent(bot, 555, halachot, mixedFetch);
 
-    // Both should be audio (first via buffer, second via URL passthrough)
+    // Both should be audio (first via voice, second via URL passthrough)
     expect(result.audioCount).toBe(2);
     expect(result.textCount).toBe(0);
-    expect(bot.sendAudio).toHaveBeenCalledTimes(2);
 
-    // First call: buffer
-    expect(Buffer.isBuffer(bot.sendAudio.mock.calls[0][1])).toBe(true);
-    // Second call: URL string (fallback)
-    expect(typeof bot.sendAudio.mock.calls[1][1]).toBe('string');
+    // First call: sendVoice with buffer
+    expect(bot.sendVoice).toHaveBeenCalledTimes(1);
+    expect(Buffer.isBuffer(bot.sendVoice.mock.calls[0][1])).toBe(true);
+    // Second call: sendAudio with URL string (fallback)
+    expect(bot.sendAudio).toHaveBeenCalledTimes(1);
+    expect(typeof bot.sendAudio.mock.calls[0][1]).toBe('string');
   });
 
   it('broadcasts to multiple subscribers with independent error handling', async () => {
@@ -209,6 +217,7 @@ describe('Broadcast pipeline — full E2E', () => {
       const bot = createBot();
       if (chatId === 222) {
         // Subscriber 222 is blocked
+        bot.sendVoice.mockRejectedValue({ response: { body: { error_code: 403 } } });
         bot.sendAudio.mockRejectedValue({ response: { body: { error_code: 403 } } });
         bot.sendMessage.mockRejectedValue({ response: { body: { error_code: 403 } } });
         try {
@@ -241,13 +250,12 @@ describe('Broadcast pipeline — full E2E', () => {
     await sendDailyContent(bot, 123, halachot, fetchFn);
 
     // First halacha
-    const [, , opts1] = bot.sendAudio.mock.calls[0];
+    const [, , opts1] = bot.sendVoice.mock.calls[0];
     expect(opts1.caption).toContain('הלכה א');
     expect(opts1.caption).toContain('ph.yhb.org.il/20-26-12');
-    expect(opts1.title).toBe('פרק כו – הלכות שבת – סעיף יב');
 
     // Second halacha
-    const [, , opts2] = bot.sendAudio.mock.calls[1];
+    const [, , opts2] = bot.sendVoice.mock.calls[1];
     expect(opts2.caption).toContain('הלכה ב');
     expect(opts2.caption).toContain('ph.yhb.org.il/20-26-13');
   });
