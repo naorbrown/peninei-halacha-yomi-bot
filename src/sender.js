@@ -13,9 +13,24 @@
 
 import { FETCH_HEADERS } from './scraper.js';
 import { buildCaption } from './messageBuilder.js';
+import { changeSpeed } from './audioSpeed.js';
 
 // Suppress node-telegram-bot-api deprecation warning for Buffer filenames
 process.env.NTBA_FIX_350 = '1';
+
+/**
+ * Build inline keyboard with speed control buttons.
+ * @param {number} index - Halacha index (0 or 1)
+ * @returns {object} Telegram reply_markup with speed buttons
+ */
+export function buildSpeedKeyboard(index) {
+  return {
+    inline_keyboard: [[
+      { text: '⏩ 1.5x', callback_data: `spd:1.5:${index}` },
+      { text: '⏩ 2x', callback_data: `spd:2:${index}` },
+    ]],
+  };
+}
 
 /**
  * Download an audio file and return it as a Buffer.
@@ -74,6 +89,8 @@ export async function sendHalacha(bot, chatId, halacha, index, fetchFn = fetch) 
   const caption = buildCaption(halacha, index);
 
   if (halacha.audioUrl) {
+    const speedKeyboard = buildSpeedKeyboard(index);
+
     // Strategy 1: Download audio ourselves and upload buffer
     try {
       const buffer = await downloadAudio(halacha.audioUrl, fetchFn);
@@ -82,6 +99,7 @@ export async function sendHalacha(bot, chatId, halacha, index, fetchFn = fetch) 
         parse_mode: 'Markdown',
         title: halacha.title,
         performer: 'פניני הלכה',
+        reply_markup: speedKeyboard,
       }, {
         filename: `halacha-${index + 1}.mp3`,
         contentType: 'audio/mpeg',
@@ -98,6 +116,7 @@ export async function sendHalacha(bot, chatId, halacha, index, fetchFn = fetch) 
         parse_mode: 'Markdown',
         title: halacha.title,
         performer: 'פניני הלכה',
+        reply_markup: speedKeyboard,
       });
       return { audio: true };
     } catch (urlErr) {
@@ -135,3 +154,33 @@ export async function sendDailyContent(bot, chatId, halachot, fetchFn = fetch) {
   return { audioCount, textCount };
 }
 
+/**
+ * Send a sped-up version of a halacha audio to a chat.
+ *
+ * @param {TelegramBot} bot
+ * @param {number|string} chatId
+ * @param {{ url: string, title: string, audioUrl: string|null }} halacha
+ * @param {number} index - 0 or 1
+ * @param {number} speed - 1.5 or 2
+ * @param {Function} fetchFn
+ * @returns {Promise<void>}
+ */
+export async function sendSpedUpHalacha(bot, chatId, halacha, index, speed, fetchFn = fetch) {
+  if (!halacha.audioUrl) {
+    throw new Error('No audio URL available for this halacha');
+  }
+
+  const buffer = await downloadAudio(halacha.audioUrl, fetchFn);
+  const spedBuffer = await changeSpeed(buffer, speed);
+  const caption = buildCaption(halacha, index) + `\n🔊 *מהירות ${speed}x*`;
+
+  await bot.sendAudio(chatId, spedBuffer, {
+    caption,
+    parse_mode: 'Markdown',
+    title: `${halacha.title} (${speed}x)`,
+    performer: 'פניני הלכה',
+  }, {
+    filename: `halacha-${index + 1}-${speed}x.mp3`,
+    contentType: 'audio/mpeg',
+  });
+}
