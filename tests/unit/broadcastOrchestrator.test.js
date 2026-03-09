@@ -8,6 +8,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { runBroadcastDelivery } from '../../src/broadcastOrchestrator.js';
 
+// Mock the OGG converter so ffmpeg is not required
+vi.mock('../../src/audioSpeed.js', () => ({
+  convertToOgg: vi.fn(async (buf) => Buffer.alloc(buf.length, 0xaa)),
+}));
+
 // --- Helpers ---
 
 function fakeMp3(size = 5000) {
@@ -16,6 +21,7 @@ function fakeMp3(size = 5000) {
 
 function createBot() {
   return {
+    sendVoice: vi.fn(async () => ({ message_id: 1 })),
     sendAudio: vi.fn(async () => ({ message_id: 1 })),
     sendMessage: vi.fn(async () => ({ message_id: 2 })),
   };
@@ -67,14 +73,15 @@ describe('Admin delivery', () => {
     expect(stats.admin).toBe(true);
     expect(stats.adminAudio).toBe(2);
     expect(anySuccess).toBe(true);
-    // 2 sendAudio calls (one per halacha)
-    expect(bot.sendAudio).toHaveBeenCalledTimes(2);
-    expect(bot.sendAudio.mock.calls[0][0]).toBe(12345);
-    expect(bot.sendAudio.mock.calls[1][0]).toBe(12345);
+    // 2 sendVoice calls (one per halacha)
+    expect(bot.sendVoice).toHaveBeenCalledTimes(2);
+    expect(bot.sendVoice.mock.calls[0][0]).toBe(12345);
+    expect(bot.sendVoice.mock.calls[1][0]).toBe(12345);
   });
 
   it('handles admin delivery failure gracefully', async () => {
     const bot = createBot();
+    bot.sendVoice.mockRejectedValue(new Error('bot blocked'));
     bot.sendAudio.mockRejectedValue(new Error('bot blocked'));
     bot.sendMessage.mockRejectedValue(new Error('bot blocked'));
 
@@ -108,7 +115,7 @@ describe('Admin delivery', () => {
     });
 
     expect(stats.admin).toBe(false);
-    expect(bot.sendAudio).not.toHaveBeenCalled();
+    expect(bot.sendVoice).not.toHaveBeenCalled();
   });
 });
 
@@ -134,8 +141,8 @@ describe('Channel delivery', () => {
 
     expect(stats.admin).toBe(true);
     expect(stats.channel).toBe(true);
-    // 2 for admin + 2 for channel = 4 sendAudio calls
-    expect(bot.sendAudio).toHaveBeenCalledTimes(4);
+    // 2 for admin + 2 for channel = 4 sendVoice calls
+    expect(bot.sendVoice).toHaveBeenCalledTimes(4);
   });
 
   it('skips duplicate when channel ID equals admin chat ID', async () => {
@@ -155,8 +162,8 @@ describe('Channel delivery', () => {
 
     expect(stats.admin).toBe(true);
     expect(stats.channel).toBe(true);
-    // Only 2 sendAudio calls (admin), channel deduped
-    expect(bot.sendAudio).toHaveBeenCalledTimes(2);
+    // Only 2 sendVoice calls (admin), channel deduped
+    expect(bot.sendVoice).toHaveBeenCalledTimes(2);
     expect(delivered.size).toBe(1);
   });
 
@@ -200,7 +207,7 @@ describe('Subscriber delivery', () => {
 
     expect(stats.subscribers.sent).toBe(3);
     // 2 admin + 2*3 subscribers = 8
-    expect(bot.sendAudio).toHaveBeenCalledTimes(8);
+    expect(bot.sendVoice).toHaveBeenCalledTimes(8);
   });
 
   it('skips subscriber that matches admin chat ID', async () => {
@@ -221,7 +228,7 @@ describe('Subscriber delivery', () => {
     // Admin already delivered, subscriber 12345 skipped but counted
     expect(stats.subscribers.sent).toBe(2);  // Both counted as sent
     // 2 admin + 2 for subscriber 222 = 4 (not 6)
-    expect(bot.sendAudio).toHaveBeenCalledTimes(4);
+    expect(bot.sendVoice).toHaveBeenCalledTimes(4);
     expect(delivered.size).toBe(2);  // admin + subscriber 222
   });
 
@@ -232,12 +239,19 @@ describe('Subscriber delivery', () => {
 
     // First 2 calls succeed (admin), next 2 fail with 403
     let callCount = 0;
-    bot.sendAudio.mockImplementation(async (chatId) => {
+    bot.sendVoice.mockImplementation(async (chatId) => {
       callCount++;
       if (chatId === 999) {
         throw { response: { body: { error_code: 403 } } };
       }
       return { message_id: callCount };
+    });
+    // URL passthrough fallback also fails for blocked user
+    bot.sendAudio.mockImplementation(async (chatId) => {
+      if (chatId === 999) {
+        throw { response: { body: { error_code: 403 } } };
+      }
+      return { message_id: 1 };
     });
     // Text fallback also fails for blocked user
     bot.sendMessage.mockImplementation(async (chatId) => {
@@ -268,12 +282,18 @@ describe('Subscriber delivery', () => {
     const sleepFn = vi.fn(async () => {});
 
     let callCount = 0;
-    bot.sendAudio.mockImplementation(async (chatId) => {
+    bot.sendVoice.mockImplementation(async (chatId) => {
       callCount++;
       if (chatId === 777) {
         throw { response: { body: { error_code: 429, parameters: { retry_after: 5 } } } };
       }
       return { message_id: callCount };
+    });
+    bot.sendAudio.mockImplementation(async (chatId) => {
+      if (chatId === 777) {
+        throw { response: { body: { error_code: 429, parameters: { retry_after: 5 } } } };
+      }
+      return { message_id: 1 };
     });
     bot.sendMessage.mockImplementation(async (chatId) => {
       if (chatId === 777) {
@@ -320,8 +340,8 @@ describe('Deduplication', () => {
     expect(stats.admin).toBe(true);
     expect(stats.channel).toBe(true);
     expect(stats.subscribers.sent).toBe(1);
-    // Only 2 sendAudio calls total (one per halacha, to admin only)
-    expect(bot.sendAudio).toHaveBeenCalledTimes(2);
+    // Only 2 sendVoice calls total (one per halacha, to admin only)
+    expect(bot.sendVoice).toHaveBeenCalledTimes(2);
     expect(delivered.size).toBe(1);
   });
 
@@ -342,8 +362,8 @@ describe('Deduplication', () => {
 
     // admin + channel + 2 subscribers = 4 unique recipients
     expect(delivered.size).toBe(4);
-    // 4 recipients * 2 halachot = 8 sendAudio calls
-    expect(bot.sendAudio).toHaveBeenCalledTimes(8);
+    // 4 recipients * 2 halachot = 8 sendVoice calls
+    expect(bot.sendVoice).toHaveBeenCalledTimes(8);
   });
 });
 
@@ -393,10 +413,14 @@ describe('Summary', () => {
     const fetchFn = mockFetchAudioOk();
 
     let callCount = 0;
-    bot.sendAudio.mockImplementation(async (chatId) => {
+    bot.sendVoice.mockImplementation(async (chatId) => {
       callCount++;
       if (chatId === 222) throw new Error('random failure');
       return { message_id: callCount };
+    });
+    bot.sendAudio.mockImplementation(async (chatId) => {
+      if (chatId === 222) throw new Error('random failure');
+      return { message_id: 1 };
     });
     bot.sendMessage.mockImplementation(async (chatId) => {
       if (chatId === 222) throw new Error('random failure');
@@ -463,7 +487,7 @@ describe('Production scenario: admin-only, no channel, no subscribers', () => {
     expect(anySuccess).toBe(true);
 
     // Content was actually sent
-    expect(bot.sendAudio).toHaveBeenCalledTimes(2);
+    expect(bot.sendVoice).toHaveBeenCalledTimes(2);
     expect(delivered.size).toBe(1);
 
     // Summary reflects delivery

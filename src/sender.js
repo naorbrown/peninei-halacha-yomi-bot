@@ -1,18 +1,19 @@
 /**
  * Shared Halacha Sending Module
  *
- * Downloads audio files directly and uploads them as buffers to Telegram,
- * bypassing the unreliable URL-pass-through where Telegram servers fetch
- * from the CDN (which may block non-browser user agents).
+ * Downloads audio files directly, converts to OGG Opus, and sends as
+ * voice messages via Telegram. Voice messages get native speed controls
+ * (0.5x, 1x, 1.5x, 2x) regardless of audio duration.
  *
  * Fallback chain per halacha:
- *   1. Download MP3 ourselves → upload buffer to Telegram
- *   2. Pass audio URL to Telegram (let Telegram fetch)
+ *   1. Download MP3 → convert to OGG Opus → sendVoice (native speed controls)
+ *   2. Send as audio file via URL passthrough (no native speed controls)
  *   3. Send text-only message with "audio unavailable" note
  */
 
 import { FETCH_HEADERS } from './scraper.js';
 import { buildCaption } from './messageBuilder.js';
+import { convertToOgg } from './audioSpeed.js';
 
 // Suppress node-telegram-bot-api deprecation warning for Buffer filenames
 process.env.NTBA_FIX_350 = '1';
@@ -59,8 +60,8 @@ export async function downloadAudio(url, fetchFn = fetch, retries = 2) {
  * Send a single halacha to a chat.
  *
  * Tries three strategies in order:
- *   1. Download audio → upload buffer (most reliable)
- *   2. Pass URL to Telegram API (Telegram downloads)
+ *   1. Download MP3 → convert to OGG Opus → sendVoice (native speed controls)
+ *   2. Pass audio URL to Telegram as sendAudio (fallback, no speed controls)
  *   3. Text-only fallback
  *
  * @param {TelegramBot} bot
@@ -74,24 +75,23 @@ export async function sendHalacha(bot, chatId, halacha, index, fetchFn = fetch) 
   const caption = buildCaption(halacha, index);
 
   if (halacha.audioUrl) {
-    // Strategy 1: Download audio ourselves and upload buffer
+    // Strategy 1: Download MP3 → convert to OGG Opus → sendVoice
     try {
-      const buffer = await downloadAudio(halacha.audioUrl, fetchFn);
-      await bot.sendAudio(chatId, buffer, {
+      const mp3Buffer = await downloadAudio(halacha.audioUrl, fetchFn);
+      const oggBuffer = await convertToOgg(mp3Buffer);
+      await bot.sendVoice(chatId, oggBuffer, {
         caption,
         parse_mode: 'Markdown',
-        title: halacha.title,
-        performer: 'פניני הלכה',
       }, {
-        filename: `halacha-${index + 1}.mp3`,
-        contentType: 'audio/mpeg',
+        filename: `halacha-${index + 1}.ogg`,
+        contentType: 'audio/ogg',
       });
       return { audio: true };
     } catch (dlErr) {
-      console.warn(`[audio] Buffer upload failed for ${halacha.audioUrl}: ${dlErr.message}`);
+      console.warn(`[audio] Voice upload failed for ${halacha.audioUrl}: ${dlErr.message}`);
     }
 
-    // Strategy 2: Pass URL directly to Telegram
+    // Strategy 2: Pass URL directly to Telegram as audio (no speed controls)
     try {
       await bot.sendAudio(chatId, halacha.audioUrl, {
         caption,
@@ -134,4 +134,3 @@ export async function sendDailyContent(bot, chatId, halachot, fetchFn = fetch) {
 
   return { audioCount, textCount };
 }
-
