@@ -122,7 +122,7 @@ describe('Broadcast pipeline — full E2E', () => {
     expect(result.textCount).toBe(0);
   });
 
-  it('falls back to URL passthrough when audio download fails', async () => {
+  it('falls back to text when audio download fails (no sendAudio fallback)', async () => {
     const scrapeFetch = createPipelineFetch(FIXTURES.standard);
     const bot = createBot();
 
@@ -133,41 +133,15 @@ describe('Broadcast pipeline — full E2E', () => {
     const audioFailFetch = createPipelineFetch(FIXTURES.standard, { succeed: false, status: 403 });
     const result = await sendDailyContent(bot, 789, halachot, audioFailFetch);
 
-    // Should still succeed via URL passthrough (sendAudio)
-    expect(result.audioCount).toBe(2);
-    expect(result.textCount).toBe(0);
-
-    // Verify URL strings were passed via sendAudio (not sendVoice)
-    expect(bot.sendVoice).not.toHaveBeenCalled();
-    for (const call of bot.sendAudio.mock.calls) {
-      expect(typeof call[1]).toBe('string');
-    }
-  });
-
-  it('falls back to text when both voice and URL passthrough fail', async () => {
-    const scrapeFetch = createPipelineFetch(FIXTURES.standard);
-    const bot = createBot();
-    // URL passthrough also fails
-    bot.sendAudio.mockRejectedValue(new Error('Telegram cannot fetch URL'));
-
-    const halachot = await scrapeDailyHalachot(scrapeFetch, ['https://ph.yhb.org.il/api/test']);
-
-    // Send with fetch that throws on audio downloads
-    const audioFailFetch = createPipelineFetch(FIXTURES.standard, { succeed: false, throw: true, errorMsg: 'CDN down' });
-    const result = await sendDailyContent(bot, 999, halachot, audioFailFetch);
-
-    // Falls back to text
+    // Should fall back to text (no sendAudio fallback to preserve speed controls)
     expect(result.audioCount).toBe(0);
     expect(result.textCount).toBe(2);
+    expect(bot.sendVoice).not.toHaveBeenCalled();
+    expect(bot.sendAudio).not.toHaveBeenCalled();
     expect(bot.sendMessage).toHaveBeenCalledTimes(2);
-
-    // Verify text contains halacha info
-    const msg1 = bot.sendMessage.mock.calls[0][1];
-    expect(msg1).toContain('הלכה א');
-    expect(msg1).toContain('הקלטה לא זמינה');
   });
 
-  it('handles mixed success: voice for first, URL passthrough for second', async () => {
+  it('handles mixed success: voice for first, text for second', async () => {
     const scrapeFetch = createPipelineFetch(FIXTURES.standard);
     const bot = createBot();
 
@@ -192,16 +166,17 @@ describe('Broadcast pipeline — full E2E', () => {
 
     const result = await sendDailyContent(bot, 555, halachot, mixedFetch);
 
-    // Both should be audio (first via voice, second via URL passthrough)
-    expect(result.audioCount).toBe(2);
-    expect(result.textCount).toBe(0);
+    // First via voice, second falls back to text (no sendAudio fallback)
+    expect(result.audioCount).toBe(1);
+    expect(result.textCount).toBe(1);
 
     // First call: sendVoice with buffer
     expect(bot.sendVoice).toHaveBeenCalledTimes(1);
     expect(Buffer.isBuffer(bot.sendVoice.mock.calls[0][1])).toBe(true);
-    // Second call: sendAudio with URL string (fallback)
-    expect(bot.sendAudio).toHaveBeenCalledTimes(1);
-    expect(typeof bot.sendAudio.mock.calls[0][1]).toBe('string');
+    // No sendAudio fallback
+    expect(bot.sendAudio).not.toHaveBeenCalled();
+    // Second falls back to text
+    expect(bot.sendMessage).toHaveBeenCalledTimes(1);
   });
 
   it('broadcasts to multiple subscribers with independent error handling', async () => {
@@ -218,7 +193,6 @@ describe('Broadcast pipeline — full E2E', () => {
       if (chatId === 222) {
         // Subscriber 222 is blocked
         bot.sendVoice.mockRejectedValue({ response: { body: { error_code: 403 } } });
-        bot.sendAudio.mockRejectedValue({ response: { body: { error_code: 403 } } });
         bot.sendMessage.mockRejectedValue({ response: { body: { error_code: 403 } } });
         try {
           await sendDailyContent(bot, chatId, halachot, fetchFn);

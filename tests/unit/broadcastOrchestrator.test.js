@@ -246,13 +246,6 @@ describe('Subscriber delivery', () => {
       }
       return { message_id: callCount };
     });
-    // URL passthrough fallback also fails for blocked user
-    bot.sendAudio.mockImplementation(async (chatId) => {
-      if (chatId === 999) {
-        throw { response: { body: { error_code: 403 } } };
-      }
-      return { message_id: 1 };
-    });
     // Text fallback also fails for blocked user
     bot.sendMessage.mockImplementation(async (chatId) => {
       if (chatId === 999) {
@@ -288,12 +281,6 @@ describe('Subscriber delivery', () => {
         throw { response: { body: { error_code: 429, parameters: { retry_after: 5 } } } };
       }
       return { message_id: callCount };
-    });
-    bot.sendAudio.mockImplementation(async (chatId) => {
-      if (chatId === 777) {
-        throw { response: { body: { error_code: 429, parameters: { retry_after: 5 } } } };
-      }
-      return { message_id: 1 };
     });
     bot.sendMessage.mockImplementation(async (chatId) => {
       if (chatId === 777) {
@@ -417,10 +404,6 @@ describe('Summary', () => {
       callCount++;
       if (chatId === 222) throw new Error('random failure');
       return { message_id: callCount };
-    });
-    bot.sendAudio.mockImplementation(async (chatId) => {
-      if (chatId === 222) throw new Error('random failure');
-      return { message_id: 1 };
     });
     bot.sendMessage.mockImplementation(async (chatId) => {
       if (chatId === 222) throw new Error('random failure');

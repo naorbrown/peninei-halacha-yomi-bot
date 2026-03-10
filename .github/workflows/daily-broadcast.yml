@@ -64,6 +64,14 @@ jobs:
         if: steps.guard.outputs.already_sent != 'true' || github.event.inputs.force == 'true'
         run: npm ci
 
+      - name: Ensure ffmpeg is available
+        if: steps.guard.outputs.already_sent != 'true' || github.event.inputs.force == 'true'
+        run: |
+          if ! command -v ffmpeg &> /dev/null; then
+            sudo apt-get update && sudo apt-get install -y ffmpeg
+          fi
+          ffmpeg -version | head -1
+
       - name: Run broadcast
         if: steps.guard.outputs.already_sent != 'true' || github.event.inputs.force == 'true'
         run: node scripts/broadcast.js

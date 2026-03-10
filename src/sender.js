@@ -75,7 +75,9 @@ export async function sendHalacha(bot, chatId, halacha, index, fetchFn = fetch) 
   const caption = buildCaption(halacha, index);
 
   if (halacha.audioUrl) {
-    // Strategy 1: Download MP3 → convert to OGG Opus → sendVoice
+    // Download MP3 → convert to OGG Opus → sendVoice (native speed controls)
+    // Always send as voice message to preserve speed controls.
+    // No fallback to sendAudio which lacks speed controls.
     try {
       const mp3Buffer = await downloadAudio(halacha.audioUrl, fetchFn);
       const oggBuffer = await convertToOgg(mp3Buffer);
@@ -87,21 +89,8 @@ export async function sendHalacha(bot, chatId, halacha, index, fetchFn = fetch) 
         contentType: 'audio/ogg',
       });
       return { audio: true };
-    } catch (dlErr) {
-      console.warn(`[audio] Voice upload failed for ${halacha.audioUrl}: ${dlErr.message}`);
-    }
-
-    // Strategy 2: Pass URL directly to Telegram as audio (no speed controls)
-    try {
-      await bot.sendAudio(chatId, halacha.audioUrl, {
-        caption,
-        parse_mode: 'Markdown',
-        title: halacha.title,
-        performer: 'פניני הלכה',
-      });
-      return { audio: true };
-    } catch (urlErr) {
-      console.warn(`[audio] URL passthrough failed for ${halacha.audioUrl}: ${urlErr.message}`);
+    } catch (err) {
+      console.warn(`[audio] Voice message failed for ${halacha.audioUrl}: ${err.message}`);
     }
   }
 
