@@ -7,7 +7,7 @@
  *
  * Fallback chain per halacha:
  *   1. Download MP3 → convert to OGG Opus → sendVoice (native speed controls)
- *   2. Send as audio file via URL passthrough (no native speed controls)
+ *   2. Pass audio URL to Telegram via sendAudio (Telegram downloads it; no speed controls)
  *   3. Send text-only message with "audio unavailable" note
  */
 
@@ -75,9 +75,7 @@ export async function sendHalacha(bot, chatId, halacha, index, fetchFn = fetch) 
   const caption = buildCaption(halacha, index);
 
   if (halacha.audioUrl) {
-    // Download MP3 → convert to OGG Opus → sendVoice (native speed controls)
-    // Always send as voice message to preserve speed controls.
-    // No fallback to sendAudio which lacks speed controls.
+    // Strategy 1: Download MP3 → convert to OGG Opus → sendVoice (native speed controls)
     try {
       const mp3Buffer = await downloadAudio(halacha.audioUrl, fetchFn);
       const oggBuffer = await convertToOgg(mp3Buffer);
@@ -91,6 +89,18 @@ export async function sendHalacha(bot, chatId, halacha, index, fetchFn = fetch) 
       return { audio: true };
     } catch (err) {
       console.warn(`[audio] Voice message failed for ${halacha.audioUrl}: ${err.message}`);
+    }
+
+    // Strategy 2: Pass URL to Telegram via sendAudio (Telegram fetches the file;
+    // no native speed controls, but audio still plays)
+    try {
+      await bot.sendAudio(chatId, halacha.audioUrl, {
+        caption,
+        parse_mode: 'Markdown',
+      });
+      return { audio: true };
+    } catch (err) {
+      console.warn(`[audio] sendAudio fallback failed for ${halacha.audioUrl}: ${err.message}`);
     }
   }
 

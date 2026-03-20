@@ -3,7 +3,8 @@
  *
  * Validates the audio fallback chain:
  *   1. Download MP3 → convert to OGG Opus → sendVoice (native speed controls)
- *   2. Text-only fallback (no sendAudio — speed controls must be preserved)
+ *   2. Pass audio URL to Telegram via sendAudio (no speed controls)
+ *   3. Text-only fallback with "audio unavailable" note
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -208,7 +209,35 @@ describe('sendHalacha()', () => {
     });
   });
 
-  describe('Strategy 2: text-only fallback', () => {
+  describe('Strategy 2: sendAudio URL passthrough fallback', () => {
+    it('falls back to sendAudio when voice upload fails (download error)', async () => {
+      const fetchFn = mockFetchFail(500);
+
+      const result = await sendHalacha(bot, 123, HALACHA_WITH_AUDIO, 0, fetchFn);
+
+      expect(result.audio).toBe(true);
+      expect(bot.sendAudio).toHaveBeenCalledTimes(1);
+      expect(bot.sendAudio).toHaveBeenCalledWith(
+        123,
+        HALACHA_WITH_AUDIO.audioUrl,
+        expect.objectContaining({ parse_mode: 'Markdown' }),
+      );
+      expect(bot.sendMessage).not.toHaveBeenCalled();
+    });
+
+    it('falls back to sendAudio when sendVoice to Telegram fails', async () => {
+      const fetchFn = mockFetchAudioOk();
+      bot.sendVoice.mockRejectedValueOnce(new Error('upload failed'));
+
+      const result = await sendHalacha(bot, 123, HALACHA_WITH_AUDIO, 0, fetchFn);
+
+      expect(result.audio).toBe(true);
+      expect(bot.sendAudio).toHaveBeenCalledTimes(1);
+      expect(bot.sendMessage).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('Strategy 3: text-only fallback', () => {
     it('sends text when no audioUrl exists', async () => {
       const fetchFn = mockFetchAudioOk();
 
@@ -223,28 +252,18 @@ describe('sendHalacha()', () => {
       expect(msgText).toContain('הקלטה לא זמינה');
     });
 
-    it('sends text when voice upload fails', async () => {
+    it('sends text when both voice and sendAudio fail', async () => {
       const fetchFn = mockFetchFail(500);
+      bot.sendAudio.mockRejectedValueOnce(new Error('sendAudio failed'));
 
       const result = await sendHalacha(bot, 123, HALACHA_WITH_AUDIO, 0, fetchFn);
 
       expect(result.audio).toBe(false);
-      expect(bot.sendAudio).not.toHaveBeenCalled();
+      expect(bot.sendAudio).toHaveBeenCalledTimes(1);
       expect(bot.sendMessage).toHaveBeenCalledTimes(1);
 
       const msgText = bot.sendMessage.mock.calls[0][1];
       expect(msgText).toContain('הקלטה לא זמינה');
-    });
-
-    it('sends text when sendVoice to Telegram fails', async () => {
-      const fetchFn = mockFetchAudioOk();
-      bot.sendVoice.mockRejectedValueOnce(new Error('upload failed'));
-
-      const result = await sendHalacha(bot, 123, HALACHA_WITH_AUDIO, 0, fetchFn);
-
-      expect(result.audio).toBe(false);
-      expect(bot.sendAudio).not.toHaveBeenCalled();
-      expect(bot.sendMessage).toHaveBeenCalledTimes(1);
     });
 
     it('includes caption in text fallback', async () => {
@@ -325,8 +344,20 @@ describe('sendDailyContent()', () => {
     expect(result.textCount).toBe(1);
   });
 
-  it('returns all text when audio completely fails', async () => {
+  it('falls back to sendAudio when download fails', async () => {
     const fetchFn = mockFetchFail(500);
+    const halachot = [HALACHA_WITH_AUDIO, HALACHA_WITH_AUDIO];
+
+    const result = await sendDailyContent(bot, 123, halachot, fetchFn);
+
+    expect(result.audioCount).toBe(2);
+    expect(result.textCount).toBe(0);
+    expect(bot.sendAudio).toHaveBeenCalledTimes(2);
+  });
+
+  it('returns all text when both voice and sendAudio fail', async () => {
+    const fetchFn = mockFetchFail(500);
+    bot.sendAudio.mockRejectedValue(new Error('sendAudio failed'));
     const halachot = [HALACHA_WITH_AUDIO, HALACHA_WITH_AUDIO];
 
     const result = await sendDailyContent(bot, 123, halachot, fetchFn);
@@ -345,6 +376,7 @@ describe('sendDailyContent()', () => {
 
   it('propagates sendMessage errors (text fallback failure)', async () => {
     bot.sendVoice.mockRejectedValue(new Error('voice fail'));
+    bot.sendAudio.mockRejectedValue(new Error('audio fail'));
     bot.sendMessage.mockRejectedValue(new Error('blocked by user'));
     const fetchFn = mockFetchFail(500);
 
