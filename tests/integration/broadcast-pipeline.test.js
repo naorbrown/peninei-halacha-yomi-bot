@@ -122,7 +122,7 @@ describe('Broadcast pipeline — full E2E', () => {
     expect(result.textCount).toBe(0);
   });
 
-  it('falls back to text when audio download fails (no sendAudio fallback)', async () => {
+  it('falls back to sendAudio when audio download fails', async () => {
     const scrapeFetch = createPipelineFetch(FIXTURES.standard);
     const bot = createBot();
 
@@ -133,11 +133,26 @@ describe('Broadcast pipeline — full E2E', () => {
     const audioFailFetch = createPipelineFetch(FIXTURES.standard, { succeed: false, status: 403 });
     const result = await sendDailyContent(bot, 789, halachot, audioFailFetch);
 
-    // Should fall back to text (no sendAudio fallback to preserve speed controls)
+    // Should fall back to sendAudio (Telegram downloads the file)
+    expect(result.audioCount).toBe(2);
+    expect(result.textCount).toBe(0);
+    expect(bot.sendVoice).not.toHaveBeenCalled();
+    expect(bot.sendAudio).toHaveBeenCalledTimes(2);
+    expect(bot.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('falls back to text when both voice and sendAudio fail', async () => {
+    const scrapeFetch = createPipelineFetch(FIXTURES.standard);
+    const bot = createBot();
+    bot.sendAudio.mockRejectedValue(new Error('sendAudio failed'));
+
+    const halachot = await scrapeDailyHalachot(scrapeFetch, ['https://ph.yhb.org.il/api/test']);
+
+    const audioFailFetch = createPipelineFetch(FIXTURES.standard, { succeed: false, status: 403 });
+    const result = await sendDailyContent(bot, 789, halachot, audioFailFetch);
+
     expect(result.audioCount).toBe(0);
     expect(result.textCount).toBe(2);
-    expect(bot.sendVoice).not.toHaveBeenCalled();
-    expect(bot.sendAudio).not.toHaveBeenCalled();
     expect(bot.sendMessage).toHaveBeenCalledTimes(2);
   });
 
@@ -166,17 +181,16 @@ describe('Broadcast pipeline — full E2E', () => {
 
     const result = await sendDailyContent(bot, 555, halachot, mixedFetch);
 
-    // First via voice, second falls back to text (no sendAudio fallback)
-    expect(result.audioCount).toBe(1);
-    expect(result.textCount).toBe(1);
+    // First via voice, second falls back to sendAudio
+    expect(result.audioCount).toBe(2);
+    expect(result.textCount).toBe(0);
 
     // First call: sendVoice with buffer
     expect(bot.sendVoice).toHaveBeenCalledTimes(1);
     expect(Buffer.isBuffer(bot.sendVoice.mock.calls[0][1])).toBe(true);
-    // No sendAudio fallback
-    expect(bot.sendAudio).not.toHaveBeenCalled();
-    // Second falls back to text
-    expect(bot.sendMessage).toHaveBeenCalledTimes(1);
+    // Second: sendAudio fallback (Telegram fetches URL)
+    expect(bot.sendAudio).toHaveBeenCalledTimes(1);
+    expect(bot.sendMessage).not.toHaveBeenCalled();
   });
 
   it('broadcasts to multiple subscribers with independent error handling', async () => {
@@ -193,6 +207,7 @@ describe('Broadcast pipeline — full E2E', () => {
       if (chatId === 222) {
         // Subscriber 222 is blocked
         bot.sendVoice.mockRejectedValue({ response: { body: { error_code: 403 } } });
+        bot.sendAudio.mockRejectedValue({ response: { body: { error_code: 403 } } });
         bot.sendMessage.mockRejectedValue({ response: { body: { error_code: 403 } } });
         try {
           await sendDailyContent(bot, chatId, halachot, fetchFn);
