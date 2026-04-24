@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  A Telegram bot that delivers two daily <a href="https://ph.yhb.org.il/pninayomit/">Peninei Halacha</a> voice recordings every morning at 05:00 Israel time.
+  A Telegram bot that delivers two daily <a href="https://ph.yhb.org.il/pninayomit/">Peninei Halacha</a> voice recordings every morning at 03:00 Israel time.
 </p>
 
 <p align="center">
@@ -21,7 +21,7 @@
 
 ## Features
 
-- **Daily delivery** — Two halachot sent automatically at 05:00 Israel time (DST-aware)
+- **Daily delivery** — Two halachot sent automatically at 03:00 Israel time (DST-aware)
 - **Audio + text** — Voice recordings with linked titles; graceful text fallback if audio is unavailable
 - **Subscriber management** — Subscribe/unsubscribe via Telegram commands
 - **Admin controls** — Manual broadcast trigger and startup/status notifications
@@ -99,7 +99,7 @@ Add these secrets to your GitHub repo settings:
 - `ADMIN_CHAT_ID`
 - `TELEGRAM_CHANNEL_ID` (optional — for broadcasting to a channel)
 
-The `daily-broadcast.yml` workflow runs automatically at 05:00 Israel time.
+The `daily-broadcast.yml` workflow runs automatically at 03:00 Israel time.
 
 ## Configuration
 
