@@ -14,7 +14,13 @@ import TelegramBot from 'node-telegram-bot-api';
 import { scrapeDailyHalachot, dailyApiUrls, clearCache } from '../src/scraper.js';
 import { loadSubscribers, removeSubscriber } from '../src/utils/subscribers.js';
 import { wasBroadcastSentToday, markBroadcastSent } from '../src/utils/broadcastState.js';
-import { isIsraelBroadcastWindow } from '../src/utils/israelTime.js';
+import {
+  isIsraelBroadcastWindow,
+  getIsraelMinutes,
+  getIsraelDate,
+  BROADCAST_START_MINUTES,
+  BROADCAST_END_MINUTES,
+} from '../src/utils/israelTime.js';
 import { runBroadcastDelivery } from '../src/broadcastOrchestrator.js';
 
 // --- Config ---
@@ -38,14 +44,23 @@ if (ADMIN_CHAT_ID && CHANNEL_ID && String(ADMIN_CHAT_ID) === String(CHANNEL_ID))
 
 const bot = new TelegramBot(BOT_TOKEN);
 
-/**
- * Main broadcast function
- */
+function formatMinutes(m) {
+  const h = Math.floor(m / 60).toString().padStart(2, '0');
+  const mm = (m % 60).toString().padStart(2, '0');
+  return `${h}:${mm}`;
+}
+
 async function runBroadcast() {
+  const israelMinutes = getIsraelMinutes();
+  console.log(
+    `Israel time: ${formatMinutes(israelMinutes)} on ${getIsraelDate()} ` +
+      `(window ${formatMinutes(BROADCAST_START_MINUTES)}–${formatMinutes(BROADCAST_END_MINUTES)}, force=${FORCE})`
+  );
+
   // --- Guards ---
   if (!FORCE) {
     if (!isIsraelBroadcastWindow()) {
-      console.log('Outside Israel broadcast window (0-7), skipping.');
+      console.log('Outside Israel broadcast window, skipping.');
       return;
     }
     if (await wasBroadcastSentToday()) {

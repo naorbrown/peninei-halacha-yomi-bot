@@ -2,12 +2,22 @@ name: Daily Broadcast
 
 on:
   schedule:
-    # Run at both possible 5am Israel times to handle DST transitions:
-    # Winter (UTC+2): 5am Israel = 3am UTC
-    # Summer (UTC+3): 5am Israel = 2am UTC
-    # The script checks Israel time + "already sent today" to prevent duplicates.
-    - cron: '0 2 * * *'
-    - cron: '0 3 * * *'
+    # Target: 3:00am Israel time every day (regardless of DST).
+    # Israel timezone is UTC+3 in summer (IDT) and UTC+2 in winter (IST), so
+    # 3am Israel is either 00:00 UTC (summer) or 01:00 UTC (winter).
+    #
+    # GitHub Actions scheduled workflows are best-effort and can be delayed by
+    # 10-90+ minutes during high-load windows. To minimise that slippage we
+    # schedule six cron entries every 30 minutes spanning both DST offsets.
+    # The broadcast script enforces: Israel time >= 03:00 AND < 07:00, and the
+    # per-day sentinel + state file prevent duplicate sends. The first run
+    # that fires after 3am Israel wins.
+    - cron: '0 0 * * *'    # 03:00 IDT | 02:00 IST (guard rejects in winter)
+    - cron: '30 0 * * *'   # 03:30 IDT | 02:30 IST (guard rejects in winter)
+    - cron: '0 1 * * *'    # 04:00 IDT | 03:00 IST
+    - cron: '30 1 * * *'   # 04:30 IDT | 03:30 IST
+    - cron: '0 2 * * *'    # 05:00 IDT | 04:00 IST
+    - cron: '30 2 * * *'   # 05:30 IDT | 04:30 IST
   workflow_dispatch:
     inputs:
       force:
